@@ -23,6 +23,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/architecture/provider-manager.md`](architecture/provider-manager.md):
+  custom-build provider/model editor ownership, redacted projections, source-preserving
+  profile writes, revision checks, explicit discovery, and verification boundaries.
+
 - [`docs/architecture/model-picker-routing.md`](architecture/model-picker-routing.md):
   current contract for provider-scoped model identity, exact OpenRouter route
   matching, overflow promotion, routed fallback, and selected-row rendering.

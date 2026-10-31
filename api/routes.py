@@ -17067,6 +17067,13 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     # ── Providers (GET) ──
+    if parsed.path == "/api/provider-manager":
+        from api.provider_manager import read_editor, EditorError
+        try:
+            return j(handler, read_editor())
+        except EditorError as exc:
+            return bad(handler, str(exc), status=exc.status)
+
     if parsed.path == "/api/providers":
         # Apply the active per-request profile's env so provider auth probes
         # resolve against that profile's credentials, not the process-default
@@ -17075,7 +17082,7 @@ def handle_get(handler, parsed) -> bool:
         # the 30s frontend timeout. No-op for the default profile.
         from api.profiles import profile_env_for_active_request_readonly
         with profile_env_for_active_request_readonly("/api/providers", logger_override=logger):
-            return j(handler, get_providers())
+            return j(handler, {**get_providers(), "profile": _get_active_profile_name()})
 
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
@@ -18929,6 +18936,24 @@ def handle_post(handler, parsed) -> bool:
         return bad(handler, f"unknown scope: {scope}", status=400)
 
     # ── Providers (POST) ──
+    if parsed.path == "/api/provider-manager/discover":
+        from api.provider_manager import EditorError
+        from api.provider_manager_probe import discover
+        from api.profiles import profile_env_for_active_request_readonly
+        try:
+            with profile_env_for_active_request_readonly("/api/provider-manager/discover", logger_override=logger):
+                result = discover(body)
+            return j(handler, result)
+        except EditorError as exc:
+            return bad(handler, str(exc), status=exc.status)
+
+    if parsed.path == "/api/provider-manager":
+        from api.provider_manager import write_editor, EditorError
+        try:
+            return j(handler, write_editor(body))
+        except EditorError as exc:
+            return bad(handler, str(exc), status=exc.status)
+
     if parsed.path == "/api/providers":
         provider_id = (body.get("provider") or "").strip().lower()
         api_key = body.get("api_key")

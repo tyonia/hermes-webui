@@ -6952,7 +6952,7 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
-def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
+def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None, *, config_guard=None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
     if not selected_model:
@@ -6963,6 +6963,8 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     # reload_config() acquires _cfg_lock internally (it's not reentrant) so
     # it must be called AFTER releasing the lock to avoid deadlock.
     with _cfg_lock:
+        if config_guard is not None:
+            config_guard(config_path)
         config_data = _load_yaml_config_file(config_path)
         model_cfg = config_data.get("model", {})
         if not isinstance(model_cfg, dict):
