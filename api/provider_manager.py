@@ -285,8 +285,11 @@ def _patch(entry, changes, source, data, pid):
             if value not in MODES:
                 raise EditorError("Unsupported transport; preserve it or edit config.yaml directly.")
             entry.pop("transport", None)
-        elif field == "default_model" and source == "custom_providers":
-            target = "model"
+        elif field == "default_model":
+            target = "model" if source == "custom_providers" else "default_model"
+            # Both spellings are one editable value. An old alias must not
+            # resurrect a cleared default on the next read.
+            entry.pop("default_model" if target == "model" else "model", None)
         elif field == "key_env":
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
                 raise EditorError("Invalid credential environment variable name.")

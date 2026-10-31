@@ -38,7 +38,9 @@ compatibility with a new Agent or provider API.
 - Stage 1: fork, custom branch, controlled update guard and regression tests.
 - Stage 2: source-preserving profile config adapter and API.
 - Stage 3: provider/model split editor, discovery and integration checks.
-- Stage 4: isolated acceptance tests, reviewable commits, and deployment handoff.
+- Deployment is separate: review the commits and isolated acceptance evidence,
+  then explicitly authorize any restart of an existing service or real-state
+  validation. No profile migration is needed to enable the editor.
 
 The interface follows the provider/model editing workflow in agegr/pi-web
 (MIT), adapted to Hermes's existing Python and vanilla JavaScript architecture.

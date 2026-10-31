@@ -7568,6 +7568,7 @@ async function switchToProfile(name) {
     if (typeof _clearEmptyComposerModelOverride === 'function') _clearEmptyComposerModelOverride();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if(typeof window!=='undefined'&&window.HermesProviderManager) window.HermesProviderManager.profileChanged(S.activeProfile);
     // The switch's optimistic chip already claims the new profile, but the
     // localStorage hidden_tabs / tab_order mirror still holds the PREVIOUS
     // profile's snapshot until _refreshProfileSwitchBackground()'s
@@ -8655,6 +8656,7 @@ function _extractSettingsValueText(field) {
 }
 
 function _settingsSearchIdentityBase(entry) {
+  if(entry.pmRef) return JSON.stringify(['provider-manager',entry.pmRef,entry.pmModelIndex??null]);
   return JSON.stringify([
     entry.sectionKey || '',
     entry.i18nKey || '',
@@ -8774,6 +8776,11 @@ function _collectSettingsIndex(includeDynamic = true) {
         });
       });
     }
+    if (sectionKey === 'providers'&&typeof window!=='undefined'&&window.HermesProviderManager) {
+      for(const entry of window.HermesProviderManager.searchEntries()){
+        add({...entry,titleText:entry.label,sectionKey,el:$('providerManagerRoot')});
+      }
+    }
     if (sectionKey === 'plugins') {
       pane.querySelectorAll('.plugin-card').forEach(card => {
         const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
@@ -8800,6 +8807,13 @@ function _collectSettingsIndex(includeDynamic = true) {
     }
   }
   return index;
+}
+
+function _refreshProviderManagerSettingsSearch(){
+  if(!_settingsIndex||_settingsIndexPromise) return;
+  _settingsIndex=_collectSettingsIndex(true);
+  const input=$('settingsSearch');
+  if(input&&input.value.trim()) filterSettings(input.value);
 }
 
 async function filterSettings(query) {
@@ -8950,6 +8964,9 @@ function _resolveSettingsField(entry) {
     help: 'settingsPaneHelp',
   };
   const pane = $(paneIds[entry.sectionKey]);
+  if(pane&&entry.pmRef&&typeof window!=='undefined'&&window.HermesProviderManager){
+    return window.HermesProviderManager.reveal(entry.pmRef,entry.pmModelIndex);
+  }
   if (pane && entry.cardName && (entry.sectionKey === 'providers' || entry.sectionKey === 'plugins')) {
     const cards = entry.sectionKey === 'providers'
       ? pane.querySelectorAll('.provider-card')
@@ -11744,6 +11761,9 @@ async function _fetchProviderQuotaStatus(force=false){
 }
 
 async function loadProvidersPanel(){
+  if(typeof window!=='undefined'&&window.HermesProviderManager&&$('providerManagerRoot')){
+    return window.HermesProviderManager.mount($('providerManagerRoot'));
+  }
   const list=$('providersList');
   const empty=$('providersEmpty');
   if(!list) return;

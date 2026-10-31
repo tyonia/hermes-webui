@@ -1,5 +1,21 @@
 # Hermes Web UI: Browser Testing Plan
 
+## Custom provider manager
+
+Run `./scripts/test.sh -q tests/test_provider_manager.py tests/test_controlled_updates.py`
+with an isolated `HERMES_HOME` and `HERMES_WEBUI_STATE_DIR`. Also run neighboring
+provider, native-config, default-model, live-model and update tests when changing
+the editor's write path. Tests and browser trials must use synthetic credentials.
+
+In a disposable localhost instance, open Settings → Providers at desktop,
+768px and 390px widths. Create a custom provider, save/reload it, edit a model's
+label/context, fetch a local fixture model list, select/import only chosen models
+and save. Verify exact IDs and unrelated YAML fields survive. Check disabled
+records, dirty-draft navigation, failed/stale saves, default-model/reference
+protection, keyboard focus, long IDs and theme changes. Existing credential and
+usage cards remain available. Browser completion/OAuth calls are not part of
+this trial; do not use production profiles.
+
 ## User-bounded legacy tool anchors (#8427)
 
 Run `./scripts/test.sh -q -rs tests/test_issue8427_tool_anchor_user_boundary.py`.

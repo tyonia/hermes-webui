@@ -219,6 +219,16 @@ def test_disabled_rows_remain_editable(store):
     assert editor.read_editor()["providers"][0]["enabled"] is True
 
 
+def test_clearing_provider_default_does_not_resurrect_alias(store):
+    path, data, _ = store
+    data["providers"]["custom:relay"].update(default_model="one", model="old-alias")
+    path.write_text(yaml.safe_dump(data))
+    editor.write_editor(operation(changes={"default_model": ""}))
+    row = raw(path)["providers"]["custom:relay"]
+    assert "default_model" not in row and "model" not in row
+    assert editor.read_editor()["providers"][0]["default_model"] == ""
+
+
 def test_symlink_is_preserved_and_retargeted_draft_rejected(store, monkeypatch, tmp_path):
     path, data, _ = store
     link = tmp_path / "linked-config.yaml"

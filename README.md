@@ -1,5 +1,9 @@
 # Hermes Web UI
 
+> This fork includes an independent profile provider/model editor and controlled
+> WebUI upgrades. See [custom-build maintenance](docs/CUSTOM-BUILD.md) and the
+> [provider editor contract](docs/architecture/provider-manager.md).
+
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
 Hermes WebUI is a lightweight, dark-themed web app interface in your browser for [Hermes Agent](https://hermes-agent.nousresearch.com/).
