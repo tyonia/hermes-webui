@@ -5,6 +5,7 @@
 
 const LOCALES = {
   en: {
+    update_controlled_instruction: 'Custom WebUI: merge and verify upstream changes before deploying. Browser upgrades are disabled.',
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',

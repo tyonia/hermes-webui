@@ -1,0 +1,7 @@
+{
+  "name": "Hermes Provider Manager",
+  "schema": 1,
+  "update_policy": "controlled",
+  "branch": "codex/provider-manager",
+  "upstream": "https://github.com/nesquena/hermes-webui"
+}

@@ -501,6 +501,10 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
        closed on its own (``run_drain.mark_restart_pending``) until the process
        is replaced; a failed update reopens it.
     """
+    from api.controlled_updates import refusal
+    blocked = refusal(target, REPO_ROOT)
+    if blocked:
+        return blocked
     from api import run_drain
 
     blocker_snapshot = _restart_blocker_snapshot()
@@ -1847,12 +1851,14 @@ def cached_update_status(*, include_agent=True, channel=None):
         if not include_agent:
             cached['agent'] = _ignored_agent_update_info()
     cached['cached'] = True
-    return cached
+    from api.controlled_updates import decorate
+    return decorate(cached, REPO_ROOT)
 
 
 def check_for_updates(force=False, *, include_agent=True, channel=None):
     """Return cached update status for webui and agent repos."""
     global _check_in_progress
+    from api.controlled_updates import decorate
     include_agent = bool(include_agent)
     if channel is None:
         channel = _read_update_channel()
@@ -1873,11 +1879,11 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
         ):
             cached = dict(_update_cache)
             cached['cached'] = True
-            return cached
+            return decorate(cached, REPO_ROOT)
         if _check_in_progress and cache_matches:
             cached = dict(_update_cache)
             cached['cached'] = True
-            return cached  # another thread is already checking this channel
+            return decorate(cached, REPO_ROOT)  # another thread is already checking this channel
         _check_in_progress = True
 
     try:
@@ -1896,7 +1902,7 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             _update_cache['checked_at'] = time.time()
             _update_cache['include_agent'] = include_agent
             _update_cache['channel'] = channel
-            return dict(_update_cache)
+            return decorate(_update_cache, REPO_ROOT)
     finally:
         _check_in_progress = False
 
