@@ -97,14 +97,18 @@
           }
           return;
         }
+        const sameProfile = this.view?.profile === view.profile;
+        const selectedModel = sameProfile && this.index !== null ? this.current?.models?.[this.index]?.id : null;
+        const selectedManaged = sameProfile ? this.current?.managed : null;
         this.view = view;
         this.managed = [];
         this.stale = false;
         const oldRef = this.current && this.current.ref;
         const next = view.providers.find(p => p.ref === oldRef) || view.providers[0];
-        this.current = next ? this.draft(next) : null;
+        this.current = selectedManaged ? {ref: 'managed:' + selectedManaged.id, managed: selectedManaged} : next ? this.draft(next) : null;
         if (!this.current && this.managed.length) this.current = {ref: 'managed:' + this.managed[0].id, managed: this.managed[0]};
-        this.index = null;
+        const restoredIndex = selectedModel && next ? next.models.findIndex(model => model.id === selectedModel) : -1;
+        this.index = restoredIndex >= 0 ? restoredIndex : null;
         this.render();
         // Status/auth probing can be slow. Config editing must become usable
         // without waiting for it, and results must belong to the same profile.
@@ -114,6 +118,9 @@
           if (!this.current && !this.dirty && this.managed.length) {
             this.current = {ref: 'managed:' + this.managed[0].id, managed: this.managed[0]};
             this.renderDetail();
+          } else if (this.current?.managed && !this.dirty) {
+            const refreshed = this.managed.find(provider => provider.id === this.current.managed.id);
+            if (refreshed) { this.current.managed = refreshed; this.renderDetail(); }
           }
           this.renderSidebar();
           if (typeof _refreshProviderManagerSettingsSearch === 'function') _refreshProviderManagerSettingsSearch();

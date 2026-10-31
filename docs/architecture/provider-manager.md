@@ -76,7 +76,9 @@ executed by discovery; use Hermes CLI discovery for those configurations.
 The form requires saved provider settings before discovery. Search/select/import
 changes only the draft; Save commits it. Results from a superseded selection
 are ignored. Navigation is locked during an in-flight mutation, and drafts
-survive refused saves. No drafts or secrets are stored in browser persistence.
+survive refused saves. A background refresh restores the selected model by exact
+ID within its provider; credential refresh keeps the selected managed provider
+and updates its status. No drafts or secrets are stored in browser persistence.
 
 ## Verification and remaining scope
 

@@ -16,6 +16,11 @@ protection, keyboard focus, long IDs and theme changes. Existing credential and
 usage cards remain available. Browser completion/OAuth calls are not part of
 this trial; do not use production profiles.
 
+Run `./scripts/test.sh -q tests/test_provider_manager_frontend.py` for the
+dependency-free Node DOM fixture covering exact model selection across refresh,
+retained drafts after profile changes, and refreshed managed credential status.
+It executes the real browser module but does not prove browser layout behavior.
+
 ## User-bounded legacy tool anchors (#8427)
 
 Run `./scripts/test.sh -q -rs tests/test_issue8427_tool_anchor_user_boundary.py`.
