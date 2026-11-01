@@ -106,7 +106,6 @@
         const oldRef = this.current && this.current.ref;
         const next = view.providers.find(p => p.ref === oldRef) || view.providers[0];
         this.current = selectedManaged ? {ref: 'managed:' + selectedManaged.id, managed: selectedManaged} : next ? this.draft(next) : null;
-        if (!this.current && this.managed.length) this.current = {ref: 'managed:' + this.managed[0].id, managed: this.managed[0]};
         const restoredIndex = selectedModel && next ? next.models.findIndex(model => model.id === selectedModel) : -1;
         this.index = restoredIndex >= 0 ? restoredIndex : null;
         this.render();
@@ -115,13 +114,11 @@
         managedPromise.then(managed => {
           if (this.view !== view || this.stale || managed.profile !== view.profile) return;
           this.managed = (managed.providers || []).filter(p => !p.is_custom && (p.configurable || p.is_oauth || p.is_self_hosted || p.is_plugin_provider));
-          if (!this.current && !this.dirty && this.managed.length) {
-            this.current = {ref: 'managed:' + this.managed[0].id, managed: this.managed[0]};
-            this.renderDetail();
-          } else if (this.current?.managed && !this.dirty) {
+          if (this.current?.managed && !this.dirty) {
             const refreshed = this.managed.find(provider => provider.id === this.current.managed.id);
             if (refreshed) { this.current.managed = refreshed; this.renderDetail(); }
           }
+          this.updateProviderTypes();
           this.renderSidebar();
           if (typeof _refreshProviderManagerSettingsSearch === 'function') _refreshProviderManagerSettingsSearch();
         });
@@ -250,15 +247,6 @@
           this.tree.append(item);
         }
       }
-      const owned = new Set(rows.map(p => p.provider_id));
-      for (const p of this.managed) {
-        if (owned.has(p.id) || (!p.has_key && !p.is_self_hosted && this.current?.ref !== 'managed:' + p.id)) continue;
-        if (query && !p.display_name.toLowerCase().includes(query)) continue;
-        count++;
-        const item = button(p.display_name, () => this.select('managed:' + p.id), 'pm-provider-row');
-        item.setAttribute('aria-current', String(this.current?.ref === 'managed:' + p.id));
-        this.tree.append(item);
-      }
       if (!count) this.tree.append(node('p', 'pm-empty', tr('no_matches')));
     }
     renderDetail() {
@@ -266,6 +254,7 @@
       this.detail.replaceChildren();
       this.save = null;
       this.discoverButton = null;
+      this.providerTypeSelect = null;
       const current = this.current;
       if (!current) { this.detail.append(node('p', 'pm-empty', tr('empty'))); return; }
       if (current.managed) { this.renderManaged(current.managed); return; }
@@ -287,10 +276,24 @@
       this.detail.append(footer);
       this.updateActions();
     }
+    providerTypes() {
+      return [['', tr('custom_endpoint')], ...this.managed.map(provider => [provider.id, provider.display_name])];
+    }
+    updateProviderTypes() {
+      if (!this.current?.isNew || !this.providerTypeSelect) return;
+      const selected = this.providerTypeSelect.value;
+      this.providerTypeSelect.replaceChildren(...this.providerTypes().map(([value, label]) => {
+        const option = node('option', '', label);
+        option.value = value;
+        return option;
+      }));
+      this.providerTypeSelect.value = selected;
+    }
     renderProvider(draft) {
       if (draft.isNew) {
-        const options = [['', tr('custom_endpoint')], ...this.managed.map(p => [p.id, p.display_name])];
-        this.form.append(field(tr('provider_type'), '', id => { if (id) this.select('managed:' + id); }, {options}));
+        const type = field(tr('provider_type'), '', id => { if (id) this.select('managed:' + id); }, {options: this.providerTypes()});
+        this.providerTypeSelect = type.querySelector('select');
+        this.form.append(type);
         this.form.append(field(tr('provider_id'), draft.id, value => { draft.id = value; this.markDirty(); }, {placeholder: 'my-gateway', hint: tr('stable_id')}));
       }
       const grid = node('div', 'pm-grid');
@@ -496,12 +499,10 @@
     profileChanged(name) { if (instance) instance.profileChanged(name); },
     searchEntries() {
       if (!instance?.view || instance.stale) return [];
-      const custom = instance.view.providers.flatMap(provider => [
+      return instance.view.providers.flatMap(provider => [
         {label: provider.name, searchBlob: provider.name + ' ' + provider.provider_id, pmRef: provider.ref},
         ...provider.models.map((model, index) => ({label: provider.name + ' / ' + (model.label || model.id), searchBlob: provider.name + ' ' + provider.provider_id + ' ' + model.id + ' ' + model.label, pmRef: provider.ref, pmModelIndex: index})),
       ]);
-      const owned = new Set(instance.view.providers.map(p => p.provider_id));
-      return custom.concat(instance.managed.filter(p => !owned.has(p.id)).map(provider => ({label: provider.display_name, searchBlob: provider.display_name + ' ' + provider.id, pmRef: 'managed:' + provider.id})));
     },
     reveal(ref, index) {
       if (!instance || instance.stale) return null;

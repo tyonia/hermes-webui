@@ -19,6 +19,16 @@ returns a redacted projection. Invalid YAML and dangling links refuse editing.
 Disabled records remain visible so they can be enabled again. Unknown fields
 and credential values are not included in the projection.
 
+The sidebar and global settings search list only records owned by this profile's
+YAML config, including explicitly stored built-in records. Catalog-only built-in,
+OAuth, plugin and local providers are offered through **Add provider → Provider
+type**, regardless of credential status. Opening one there keeps its authentication
+and default-model controls available without pinning it into the sidebar or
+deleting credentials. An empty profile starts with an empty editor; delayed
+catalog responses update the Add picker without replacing a draft.
+The editor module asset revision is kept in sync between `index.html` and the
+service worker so a frontend-only update can load without restarting the backend.
+
 `POST /api/provider-manager` accepts `create`, `save`, `delete`, or `default`.
 Edits patch only named fields of the original `providers` mapping record or
 `custom_providers` list record. The normalized catalog view must never replace
