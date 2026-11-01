@@ -41,6 +41,7 @@
     }
     input.value = value == null ? '' : value;
     if (options.readOnly) input.readOnly = true;
+    if (options.disabled) input.disabled = true;
     input.addEventListener(options.options ? 'change' : 'input', () => action(input.value));
     wrap.append(caption, input);
     if (options.hint) wrap.append(node('small', 'pm-muted', options.hint));
@@ -109,6 +110,7 @@
         const restoredIndex = selectedModel && next ? next.models.findIndex(model => model.id === selectedModel) : -1;
         this.index = restoredIndex >= 0 ? restoredIndex : null;
         this.render();
+        this.loadChatCatalog(view);
         // Status/auth probing can be slow. Config editing must become usable
         // without waiting for it, and results must belong to the same profile.
         managedPromise.then(managed => {
@@ -118,6 +120,7 @@
             const refreshed = this.managed.find(provider => provider.id === this.current.managed.id);
             if (refreshed) { this.current.managed = refreshed; this.renderDetail(); }
           }
+          if (this.current?.is_oauth) this.renderOAuthAuthentication();
           this.updateProviderTypes();
           this.renderSidebar();
           if (typeof _refreshProviderManagerSettingsSearch === 'function') _refreshProviderManagerSettingsSearch();
@@ -130,6 +133,36 @@
     }
     draft(entry) {
       return {...clone(entry), baseline: clone(entry), credential: {action: 'keep'}, headerDrafts: entry.headers.map(h => ({...h, action: 'keep', value: ''}))};
+    }
+    async loadChatCatalog(view = this.view) {
+      try {
+        const request = window.HermesProviderCatalog?.begin();
+        const result = await api('/api/models');
+        if (this.view !== view || this.stale || result.profile !== view.profile || (result.editor_revision || result.catalog_revision) !== view.revision) return;
+        this.chatCatalog = result;
+        if (window.HermesProviderCatalog) window.HermesProviderCatalog.accept(result, view.profile, request);
+        this.renderChatCatalog();
+      } catch (_) { /* Keep editing usable when inventory discovery is unavailable. */ }
+    }
+    renderChatCatalog() {
+      if (!this.chatCatalogHost) return;
+      this.chatCatalogHost.replaceChildren();
+      if (!this.chatCatalog || this.chatCatalog.profile !== this.view.profile || (this.chatCatalog.editor_revision || this.chatCatalog.catalog_revision) !== this.view.revision) {
+        this.chatCatalogHost.append(node('p', 'pm-muted', tr('chat_catalog_loading'))); return;
+      }
+      const ids = [this.current.provider_id, this.current.canonical_id];
+      const group = (this.chatCatalog.groups || []).find(group => ids.includes(group.provider_id));
+      const models = [...(group?.models || []), ...(group?.extra_models || [])];
+      this.chatCatalogHost.append(node('p', 'pm-muted', tr('chat_catalog_hint')));
+      for (const model of models) this.chatCatalogHost.append(node('p', 'pm-muted', model.id));
+      if (!models.length) this.chatCatalogHost.append(node('p', 'pm-muted', tr('no_models')));
+    }
+    renderOAuthAuthentication() {
+      if (!this.oauthAuthHost) return;
+      this.oauthAuthHost.replaceChildren();
+      const managed = this.managed.find(provider => provider.id === this.current?.provider_id);
+      if (managed) this.oauthAuthHost.append(_buildProviderCard(managed));
+      else this.oauthAuthHost.append(node('p', 'pm-muted', tr('managed_hint')));
     }
     payload(op = 'save') {
       return {op, profile: this.view.profile, revision: this.view.revision, ref: this.current.ref};
@@ -303,13 +336,15 @@
       if (!count) this.tree.append(node('p', 'pm-empty', tr('no_matches')));
     }
     renderDetail() {
-      const advancedOpen = !!this.detail.querySelector('details[open]');
+      const openSections = new Set(Array.from(this.detail.querySelectorAll('details')).filter(item => item.open).map(item => item.dataset.pmSection));
       this.detail.replaceChildren();
       this.save = null;
       this.discoverButton = null;
       this.fetchHint = null;
       this.providerDefaultSelect = null;
       this.providerDefaultWarning = null;
+      this.chatCatalogHost = null;
+      this.oauthAuthHost = null;
       this.providerTypeSelect = null;
       const current = this.current;
       if (!current) { this.detail.append(node('p', 'pm-empty', tr('empty'))); return; }
@@ -330,7 +365,7 @@
       if (this.index === null) this.renderProvider(current);
       else this.renderModel(current, current.models[this.index]);
       this.detail.append(this.form);
-      if (advancedOpen && this.form.querySelector('details')) this.form.querySelector('details').open = true;
+      for (const section of this.form.querySelectorAll('details')) section.open = openSections.has(section.dataset.pmSection);
       const footer = node('div', 'pm-actions');
       this.save = button(tr('save'), () => this.persist(), 'pm-primary');
       footer.append(node('span', 'pm-muted', current.isNew ? tr('create_hint') : tr('save_hint')), this.save);
@@ -366,8 +401,8 @@
       grid.append(field(tr('protocol'), draft.api_mode, value => set('api_mode', value), {options: [
         ['', tr('inherit_protocol')], ['chat_completions', 'OpenAI Chat Completions'], ['codex_responses', 'OpenAI Responses'], ['anthropic_messages', 'Anthropic Messages'], ['bedrock_converse', 'Bedrock Converse'],
         ...(!['', 'chat_completions', 'codex_responses', 'anthropic_messages', 'bedrock_converse'].includes(draft.api_mode) ? [[draft.api_mode, draft.api_mode]] : []),
-      ]}));
-      this.form.append(grid, field('Base URL', draft.base_url, value => set('base_url', value), {placeholder: 'https://gateway.example/v1', hint: draft.base_url_redacted ? tr('hidden_url') : tr('url_hint')}));
+      ], disabled: !!draft.is_oauth}));
+      this.form.append(grid, field('Base URL', draft.base_url, value => set('base_url', value), {readOnly: !!draft.is_oauth, placeholder: 'https://gateway.example/v1', hint: draft.is_oauth ? tr('oauth_connection_hint') : draft.base_url_redacted ? tr('hidden_url') : tr('url_hint')}));
       const credential = node('div', 'pm-section');
       credential.append(node('h4', '', tr('credentials')));
       const mode = draft.credential.action;
@@ -380,11 +415,14 @@
       if (mode === 'env') credential.append(field(tr('env_name'), draft.credential.value, value => { draft.credential.value = value; this.markDirty(); }, {placeholder: 'MY_PROVIDER_API_KEY', hint: tr('env_hint')}));
       if (mode === 'keep' && draft.key_env) credential.append(node('p', 'pm-muted', tr('env_name') + ': ' + draft.key_env));
       const managed = this.managed.find(p => p.id === draft.provider_id);
-      if (managed?.is_oauth) {
+      if (draft.is_oauth || managed?.is_oauth) {
         const auth = node('details', 'pm-section');
+        auth.dataset.pmSection = 'authentication';
         auth.append(node('summary', '', tr('managed_auth')));
-        auth.append(_buildProviderCard(managed));
+        this.oauthAuthHost = node('div');
+        auth.append(this.oauthAuthHost);
         this.form.append(auth);
+        this.renderOAuthAuthentication();
       } else this.form.append(credential);
       const modelSection = node('div', 'pm-section');
       const modelHead = node('div', 'pm-section-head');
@@ -403,9 +441,17 @@
       modelSection.append(this.discoverButton, this.fetchHint);
       this.discoveryHost = node('div', 'pm-discovery');
       modelSection.append(this.discoveryHost);
+      const preview = node('details');
+      preview.dataset.pmSection = 'catalog';
+      preview.append(node('summary', '', tr('chat_catalog')));
+      this.chatCatalogHost = node('div', 'pm-discovered-list');
+      preview.append(this.chatCatalogHost);
+      modelSection.append(preview);
+      this.renderChatCatalog();
       this.form.append(modelSection);
       if (this.discovery) this.renderDiscovery();
       const advanced = node('details', 'pm-section');
+      advanced.dataset.pmSection = 'advanced';
       advanced.append(node('summary', '', tr('advanced')));
       advanced.append(field(tr('enabled'), String(draft.enabled), value => set('enabled', value === 'true'), {options: [['true', tr('enabled')], ['false', tr('disabled')]]}));
       advanced.append(node('h4', '', tr('headers')));
@@ -420,7 +466,8 @@
       advanced.append(headers, button(tr('add_header'), () => {
         draft.headerDrafts.push({name: '', action: 'set', value: ''});
         this.markDirty(); this.renderDetail();
-        this.detail.querySelector('details').open = true;
+        const next = Array.from(this.detail.querySelectorAll('details')).find(item => item.dataset.pmSection === 'advanced');
+        if (next) next.open = true;
       }));
       this.form.append(advanced);
     }
@@ -497,6 +544,7 @@
         this.message(tr('saved'));
         if (typeof _refreshProviderManagerSettingsSearch === 'function') _refreshProviderManagerSettingsSearch();
         if (typeof _refreshModelDropdownsAfterProviderChange === 'function') _refreshModelDropdownsAfterProviderChange();
+        this.loadChatCatalog(result);
       } catch (error) {
         if (generation !== this.generation) return;
         this.message(error.message, true);
@@ -591,4 +639,10 @@
       return instance.load();
     },
   };
+  window.addEventListener('hermes-provider-catalog', event => {
+    const data = event.detail;
+    if (!instance?.view || !data || data.profile !== instance.view.profile || (data.editor_revision || data.catalog_revision) !== instance.view.revision) return;
+    instance.chatCatalog = data;
+    instance.renderChatCatalog();
+  });
 })();

@@ -5,6 +5,31 @@ This document records the current identity and invalidation contract for the
 changes no runtime behavior. It was added after #7556 shipped in `exp-v0.52.303`,
 which the #7556 review flagged as an undocumented runtime contract.
 
+## Chooser policy after inventory reads
+
+Inventory snapshots keep the existing five-axis identity and rebuild rules
+below. Public chooser responses additionally pass through
+`api/provider_catalog_policy.CatalogScope`, including ordinary/session-visit
+cache hits, stale/static fallbacks, and live responses. No new durable inventory
+cache is introduced. A raw inventory cache is never chooser membership authority.
+
+The opaque `catalog_revision` combines the editor's profile/YAML/env/semantic-auth
+revision (including profile-local OAuth login presence) with
+`_models_cache_source_fingerprint()` (the same five source axes).
+The separate `editor_revision` lets inventory refreshes update the manager's
+saved-catalog preview without invalidating unrelated editing drafts. A changed
+profile or source fingerprint rejects a live result before cache publication.
+The server live-cache key includes the existing profile/provider key plus this
+complete catalog revision. Publishing a replacement evicts the previous revision
+for that profile/provider, retaining other owners. Main and live responses expose matching profile and
+revision metadata; the browser discards superseded completions and retries a
+revoked main request once. Fixed/hidden provider responses bypass live probing.
+
+Provider mutations and profile switches revoke browser main/live context together.
+The shared browser cache owns copied metadata and profile-scoped live lists;
+refreshing a main snapshot for the same revision preserves already accepted
+live additions for both UI surfaces. No token values are included in metadata.
+
 ## What is cached
 
 - **In memory:** `_available_models_cache` plus `_available_models_cache_ts`,

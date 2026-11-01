@@ -1,5 +1,30 @@
 # Model Picker Routing
 
+## Profile-owned chooser membership
+
+`api/provider_catalog_policy.py` applies the provider editor's enabled runtime
+owners to both `/api/models` paths (ordinary and session-visit) after every
+inventory-cache read, and to `/api/models/live` before a probe and before response
+publication. Removed, disabled, shadowed, ambiguous and unmanaged providers do
+not enter chooser responses. Profile-default and locally logged-in OAuth providers participate
+in the editor and chooser through their registered Hermes identity.
+
+Fixed catalogs return exactly their saved IDs, including an authoritative empty
+list, without live requests. Follow catalogs retain saved imports and may add vendor inventory, but pass
+the same provider membership and non-chat generation filters. Alias/badge
+metadata cannot reintroduce excluded models. The existing inventory builders
+remain available to runtime callers; chooser visibility is not credential
+revocation and does not rewrite historical session routes.
+
+The browser shares `static/provider_catalog.js` between the composer and the
+editor's saved-chat-catalog preview. Main and live data carry profile and opaque
+catalog revision. Its live cache is owned by that scope; profile switches,
+provider edits and revision changes revoke old data. Each pending live request
+also owns its pending slot, so an old completion cannot clear its successor.
+Rendering and live merging check membership as well, including temporary
+selection-restoration options. Explicit custom-ID entry and existing send-route
+authority retain their own contracts.
+
 Current identity, restoration, and selection rules for the model picker.
 
 ## Provider-scoped identity

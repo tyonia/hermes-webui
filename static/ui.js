@@ -5634,12 +5634,15 @@ async function populateModelDropdown(opts={}){
   if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
   if(typeof _modelCatalogFallbackRetried!=='boolean') _modelCatalogFallbackRetried=false;
   const requestSeq=++_modelDropdownRequestSeq;
+  const requestProfile=(typeof S!=='undefined'&&S.activeProfile)||'default';
+  const catalogRequest=window.HermesProviderCatalog?window.HermesProviderCatalog.begin():null;
   try{
     const modelsUrl=new URL('api/models',document.baseURI||location.href);
     const requestedFreshness=opts&&opts.freshness?String(opts.freshness):'';
     if(opts&&opts.freshness) modelsUrl.searchParams.set('freshness',opts.freshness);
     const _modelsRes=await fetch(modelsUrl.href,{credentials:'include'});
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(_modelsRes.status===409 && !opts.catalogRetry && ((S.activeProfile||'default')===requestProfile)) return populateModelDropdown({...opts,catalogRetry:true});
     const customRedirectIfUnauth=opts&&typeof opts.redirectIfUnauth==='function'?opts.redirectIfUnauth:null;
     if(customRedirectIfUnauth){
       if(customRedirectIfUnauth(_modelsRes)) return;
@@ -5647,6 +5650,7 @@ async function populateModelDropdown(opts={}){
     // `_activeProvider` is populated from the /api/models payload below.
     const data=await _modelsRes.json();
     if(requestSeq!==_modelDropdownRequestSeq) return;
+    if(window.HermesProviderCatalog && ((S.activeProfile||'default')!==requestProfile || !window.HermesProviderCatalog.accept(data,requestProfile,catalogRequest))) return;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
@@ -5822,9 +5826,18 @@ const _liveModelCache={};
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
+const _liveModelPendingOwners=new Map();
+window._invalidateManagedModelCatalog=function(){
+  if(window.HermesProviderCatalog) window.HermesProviderCatalog.invalidate();
+  _modelDropdownRequestSeq++;
+  _liveModelFetchPending.clear();
+  _liveModelPendingOwners.clear();
+  for(const provider of Object.keys(_liveModelCache)) delete _liveModelCache[provider];
+};
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
+  if(window.HermesProviderCatalog&&!models.some(model=>window.HermesProviderCatalog.allowed(provider,model.id))) return 0;
   const currentVal=sel.value;
   let providerGroup=null;
   for(const og of sel.querySelectorAll('optgroup')){
@@ -5853,6 +5866,7 @@ function _addLiveModelsToSelect(provider, models, sel){
   const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value,_getOptionProviderId(o))));
   let added=0;
   for(const m of models){
+    if(window.HermesProviderCatalog&&!window.HermesProviderCatalog.allowed(provider,m.id)) continue;
     let mid=m.id;
     if(_isPortalFetch && !mid.startsWith('@')){
       mid=`@${provider}:${mid}`;
@@ -5922,24 +5936,46 @@ function _addLiveModelsToSelect(provider, models, sel){
 async function _fetchLiveModels(provider, sel, requestSeq=null){
   if(!provider||!sel) return;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+  const catalog=window.HermesProviderCatalog;
+  const token=catalog?catalog.capture(provider):null;
+  if(catalog&&(!token||!catalog.acceptsLive(provider))) return;
+  const managedCached=catalog?catalog.cached(token):null;
+  if(managedCached){
+    _addLiveModelsToSelect(provider,managedCached,sel);
+    return;
+  }
   // Already fetched — apply cached models to this select element (#872)
-  if(_liveModelCache[provider]){
+  if(!catalog&&_liveModelCache[provider]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
   _liveModelFetchPending.add(provider);
+  const pendingOwner=token||{};
+  _liveModelPendingOwners.set(provider,pendingOwner);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
     const _liveRes=await fetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(_liveRes.status===409){
+      if(catalog&&catalog.current(token)){
+        window._invalidateManagedModelCatalog();
+        Promise.resolve(populateModelDropdown({freshness:'session_visit'})).catch(()=>{});
+      }
+      return;
+    }
     if(_redirectIfUnauth(_liveRes)) return;
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(catalog){
+      const scoped=catalog.acceptLive(token,data);
+      if(scoped===null) return;
+      data.models=scoped;
+    }
     if(!data.models||!data.models.length) return;
-    _liveModelCache[provider]=data.models;
+    if(!catalog) _liveModelCache[provider]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
@@ -5949,7 +5985,10 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(provider);
+    if(_liveModelPendingOwners.get(provider)===pendingOwner){
+      _liveModelPendingOwners.delete(provider);
+      _liveModelFetchPending.delete(provider);
+    }
   }
 }
 
@@ -6716,6 +6755,18 @@ function renderModelDropdown(){
       providerId:String((badge&&badge.provider)||''),
       badge,
     });
+  }
+  if(window.HermesProviderCatalog){
+    for(let i=_modelData.length-1;i>=0;i--){
+      const entry=_modelData[i];
+      if(!window.HermesProviderCatalog.allowed(entry.providerId||window._activeProvider,entry.value)) _modelData.splice(i,1);
+    }
+    for(const [key,meta] of _groupMeta){
+      const entries=_modelData.filter(entry=>entry.groupKey===key);
+      meta.modelCount=entries.filter(entry=>!entry.endpointErrorOnly).length;
+      meta.hiddenCount=entries.filter(entry=>entry.hiddenByDefault).length;
+      meta.endpointErrorOnly=entries.some(entry=>entry.endpointErrorOnly);
+    }
   }
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');

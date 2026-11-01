@@ -56,6 +56,7 @@ const context = {window, document, console, t: key => key,
   _buildProviderCard: provider => { const card = new Element('div'); card.textContent = 'Configured: ' + provider.has_key; return card; },
   api: async (path, options) => {
     const owner = profile;
+    if (path === '/api/models') return {profile: owner, catalog_revision: 'revision', groups: []};
     if (path === '/api/provider-manager/discover') {
       posts.push(JSON.parse(options.body));
       return {ok: true, models: [{id: 'fixture/discovered:free'}]};

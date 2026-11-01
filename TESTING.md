@@ -21,6 +21,21 @@ dependency-free Node DOM fixture covering exact model selection across refresh,
 retained drafts after profile changes, and refreshed managed credential status.
 It executes the real browser module but does not prove browser layout behavior.
 
+For shared chooser membership, also run `./scripts/test.sh -q
+tests/test_provider_catalog_policy.py tests/test_live_models_ttl_cache.py` with
+the same isolated directories. The policy tests cover main/session-visit cache
+reads, profile-local OAuth presence, source changes, fixed/empty catalogs,
+saved imports in partial Follow inventories, and non-chat exclusions. The Node
+catalog fixture executes the real composer live-fetch function with delayed
+responses across profile changes and checks pending-request ownership.
+
+In a disposable browser profile, compare the editor's **Available in chat**
+preview with the conversation picker after saving imports and deleting records.
+Check fixed and Follow modes, reload, and switch profiles while a live request
+is pending. Use synthetic OAuth stores and a stubbed Agent model resolver;
+this verifies UI integration, not vendor login or token validity. Capture both
+surfaces at desktop, 768px and 390px widths.
+
 ## User-bounded legacy tool anchors (#8427)
 
 Run `./scripts/test.sh -q -rs tests/test_issue8427_tool_anchor_user_boundary.py`.

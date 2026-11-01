@@ -2488,7 +2488,7 @@ _OPENAI_COMPAT_ENDPOINTS = {
 # specific model filtering happens downstream in hermes_cli.
 #
 _LIVE_MODELS_CACHE_TTL = 60.0
-_LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_LIVE_MODELS_CACHE: dict[tuple[str, ...], tuple[float, dict]] = {}
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
 
 
@@ -2509,7 +2509,7 @@ def _live_models_cache_key(provider: str) -> tuple[str, str]:
     return (_active_profile_for_live_models_cache(), provider)
 
 
-def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
+def _get_cached_live_models(key: tuple[str, ...]) -> dict | None:
     now = time.monotonic()
     with _LIVE_MODELS_CACHE_LOCK:
         cached = _LIVE_MODELS_CACHE.get(key)
@@ -2522,8 +2522,13 @@ def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
         return copy.deepcopy(payload)
 
 
-def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
+def _set_cached_live_models(key: tuple[str, ...], payload: dict) -> None:
     with _LIVE_MODELS_CACHE_LOCK:
+        # Revisions revoke the prior snapshot; do not retain one cache entry
+        # per edit forever when those old keys will never be looked up again.
+        for previous in list(_LIVE_MODELS_CACHE):
+            if previous[:2] == key[:2] and previous != key:
+                _LIVE_MODELS_CACHE.pop(previous, None)
         _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
 
 
@@ -17021,6 +17026,7 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/models":
+        from api.provider_manager import EditorError
         # Profile-scoping for non-default profiles (#3957) is handled INSIDE
         # get_available_models() — it binds the active profile's env + TLS on
         # the detached rebuild worker (and the legacy synchronous rebuild),
@@ -17031,12 +17037,22 @@ def handle_get(handler, parsed) -> bool:
         try:
             diag.stage(f"enter:freshness={freshness or 'default'}") if diag else None
             if freshness == "session_visit":
+                from api.provider_catalog_policy import CatalogScope
+                scope = CatalogScope.capture()
                 result = get_available_models_for_session_visit()
+                scope.assert_current()
+                result = scope.main(result)
                 diag.stage("response_serialize") if diag else None
                 return j(handler, result)
             if freshness:
                 return bad(handler, f"unknown models freshness: {freshness}", status=400)
-            return j(handler, get_available_models())
+            from api.provider_catalog_policy import CatalogScope
+            scope = CatalogScope.capture()
+            result = get_available_models()
+            scope.assert_current()
+            return j(handler, scope.main(result))
+        except EditorError as exc:
+            return bad(handler, str(exc), status=exc.status)
         finally:
             if diag:
                 diag.finish()
@@ -26152,6 +26168,8 @@ def _handle_live_models(handler, parsed):
     Query params:
         provider  (optional) — provider ID; defaults to active profile provider
     """
+    from api.provider_manager import EditorError
+    import json
     qs = parse_qs(parsed.query)
     provider = (qs.get("provider", [""])[0] or "").lower().strip()
 
@@ -26170,17 +26188,27 @@ def _handle_live_models(handler, parsed):
         # works even when hermes_cli is not on sys.path.
         from api.config import _resolve_provider_alias, _custom_provider_identity_disabled
         provider = _resolve_provider_alias(provider)
+        from api.provider_catalog_policy import CatalogScope
+        scope = CatalogScope.capture()
+        rule = scope.rule(provider)
+        if rule is None or not rule["discover_models"]:
+            scope.assert_current()
+            return j(handler, scope.live(provider, {"models": [], "count": 0}))
         # Explicit native disable outranks cached/external catalogs and persisted
         # pools alike. An absent config identity may still browse its own pool.
         if _custom_provider_identity_disabled(provider, cfg):
             return j(handler, {"provider": provider, "models": [], "count": 0})
 
-        cache_key = _live_models_cache_key(provider)
+        # Reuse the existing catalog fingerprint axes, plus the editor owner.
+        cache_key = _live_models_cache_key(provider) + (scope.revision,)
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
-            return j(handler, cached)
+            scope.assert_current()
+            return j(handler, scope.live(provider, cached))
 
         def _finish(payload: dict):
+            scope.assert_current()
+            payload = scope.live(provider, payload)
             _set_cached_live_models(cache_key, payload)
             return j(handler, payload)
 
@@ -26493,6 +26521,8 @@ def _handle_live_models(handler, parsed):
         return _finish({"provider": provider, "models": models_out,
                         "count": len(models_out)})
 
+    except EditorError as exc:
+        return bad(handler, str(exc), status=exc.status)
     except Exception as _e:
         logger.debug("_handle_live_models failed for %s: %s", provider, _e)
         return j(handler, {"error": str(_e), "models": []})

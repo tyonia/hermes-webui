@@ -2,7 +2,18 @@
 
 import sys
 import types
+import pytest
+import yaml
 from urllib.parse import urlparse
+
+
+@pytest.fixture(autouse=True)
+def durable_profile(monkeypatch, tmp_path):
+    from api import config, profiles
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"model": {"provider": "openai"}, "providers": {"openai": {"discover_models": True}}}))
+    monkeypatch.setattr(config, "_get_config_path", lambda: path)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
 
 def _install_provider_model_ids(monkeypatch, fn):
@@ -112,6 +123,19 @@ def test_live_models_cache_returns_deep_copies(monkeypatch):
 
     assert second["provider"] == "openai"
     assert second["models"] == [{"id": "openai/gpt-test", "label": "GPT Test", "supports_fast_tier": True}]
+
+
+def test_live_cache_replaces_superseded_revision_without_evicting_other_owners():
+    import api.routes as routes
+    routes._clear_live_models_cache()
+    try:
+        routes._set_cached_live_models(("default", "openai", "old"), {"models": []})
+        routes._set_cached_live_models(("other", "openai", "old"), {"models": []})
+        routes._set_cached_live_models(("default", "gemini", "old"), {"models": []})
+        routes._set_cached_live_models(("default", "openai", "new"), {"models": []})
+        assert set(routes._LIVE_MODELS_CACHE) == {("default", "openai", "new"), ("other", "openai", "old"), ("default", "gemini", "old")}
+    finally:
+        routes._clear_live_models_cache()
 
 
 def test_live_models_endpoint_respects_picker_visibility_budget(monkeypatch):

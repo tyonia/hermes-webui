@@ -27,6 +27,16 @@ def _expand(value):
 
 def discover(body):
     entry = discovery_record(body)
+    if entry.get("oauth_provider"):
+        from api.provider_catalog_policy import chat_models
+        from hermes_cli.models import provider_model_ids
+        try:
+            rows = chat_models(provider_model_ids(entry["oauth_provider"]) or [], entry["oauth_provider"])[:2000]
+        except Exception:
+            raise EditorError("Could not read the OAuth model catalog. Check Hermes authentication.", 502) from None
+        # OAuth refreshes must not publish results after an owner/config change.
+        discovery_record(body)
+        return {"ok": True, "models": rows, "count": len(rows)}
     base = _expand(entry.get("base_url"))
     try:
         url = urlsplit(base)
@@ -107,4 +117,6 @@ def discover(body):
         found[row["id"]] = row
         if len(found) >= 2000:
             break
-    return {"ok": True, "models": sorted(found.values(), key=lambda row: row["id"].lower()), "count": len(found)}
+    from api.provider_catalog_policy import chat_models
+    models = chat_models(list(found.values()))
+    return {"ok": True, "models": sorted(models, key=lambda row: row["id"].lower()), "count": len(models)}

@@ -80,6 +80,12 @@ def isolated(monkeypatch, tmp_path):
 
 
 def bind(monkeypatch, data):
+    # The chooser now reads the same strict profile YAML as the editor. Keep
+    # the durable fixture aligned with these runtime reader stubs.
+    path = config._get_auth_store_path().parent / "config.yaml"
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+    monkeypatch.setattr(config, "_get_config_path", lambda: path)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: path.parent)
     monkeypatch.setattr(config, "cfg", data)
     monkeypatch.setattr(config, "get_config", lambda: data)
     monkeypatch.setattr(providers, "get_config", lambda: data)
@@ -212,7 +218,9 @@ def test_live_allowlist_and_discovery_semantics(monkeypatch, native_config, mode
 
     monkeypatch.setattr("urllib.request.urlopen", probe)
     assert [m["id"] for m in live()["models"]] == expected
-    assert requests == [(URL + "/models", "Bearer synthetic-owned-key")]
+    # Fixed catalogs are returned directly without a redundant network probe.
+    fixed = not config._provider_discover_allowed(native_config["providers"][PID]) or isinstance(models, (list, str)) and bool(models)
+    assert requests == ([] if fixed else [(URL + "/models", "Bearer synthetic-owned-key")])
 
 
 def test_reasoning_and_context_metadata(monkeypatch, native_config):
@@ -717,11 +725,11 @@ def test_forced_native_discovered_catalog_probes_nonactive_provider(monkeypatch,
     assert [m["id"] for m in found["models"]] == [f"@{PID}:{mid}" for mid in expected]
     assert requests == ([] if pinned else [(URL + "/models", "Bearer synthetic-owned-key")])
     # The live endpoint shares the discovery predicate; a failed probe still
-    # returns every saved id. It always attempts the owned endpoint, even pinned.
+    # returns every saved id. A pinned chooser no longer probes upstream.
     requests.clear()
     expected_live = [MODEL, "model-10", "model-2"] if failed or pinned else ["new-model"]
     assert [m["id"] for m in live()["models"]] == expected_live
-    assert requests == [(URL + "/models", "Bearer synthetic-owned-key")]
+    assert requests == ([] if pinned else [(URL + "/models", "Bearer synthetic-owned-key")])
 
 
 @pytest.mark.parametrize("native_key", [PID, "demo-key"])
@@ -759,7 +767,9 @@ def test_disabled_native_live_refuses_even_with_persisted_pool(monkeypatch, nati
     assert config._has_explicit_pool_credentials(PID) is (enabled != "env-only")
     reads.clear()
     result = live()
-    allowed = enabled is True or enabled == "pool-only"
+    # Pool credentials alone no longer create a chooser identity: it must
+    # also be an enabled record in the profile manager.
+    allowed = enabled is True
     assert result["models"] == ([{"id": "pool-model", "label": "Pool Model"}] if allowed else [])
     assert loads == ([PID] if allowed else [])
     assert requests == ([("https://pool.invalid/v1/models", "Bearer synthetic-pool-key")] if allowed else [])

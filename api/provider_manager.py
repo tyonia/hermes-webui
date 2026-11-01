@@ -39,6 +39,40 @@ def _identity(pid):
     return config._resolve_provider_alias(config._canonicalise_provider_id(pid))
 
 
+def _oauth_ids():
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+    except ImportError:
+        return set()
+    return {_identity(pid) for pid, row in PROVIDER_REGISTRY.items()
+            if str(getattr(row, "auth_type", "")).startswith("oauth")}
+
+
+def _profile_oauth_ids():
+    """Presence only, from this profile's store; never refresh or inherit auth."""
+    raw = _read_regular(profiles.get_active_hermes_home() / "auth.json", "Profile authentication")
+    try:
+        auth = json.loads(raw) if raw.strip() else {}
+    except (ValueError, UnicodeError):
+        raise EditorError("Profile authentication cannot be parsed; repair auth.json first.", 422) from None
+    if not isinstance(auth, dict):
+        raise EditorError("Profile authentication must contain a mapping.", 422)
+    def has_token(entry):
+        if not isinstance(entry, dict):
+            return False
+        tokens = entry.get("tokens")
+        return any(isinstance(entry.get(key), str) and entry[key].strip() for key in ("access_token", "refresh_token")) or (isinstance(tokens, dict) and has_token(tokens))
+    connected = set()
+    for section in ("providers", "credential_pool"):
+        rows = auth.get(section, {})
+        if not isinstance(rows, dict):
+            continue
+        for pid, entry in rows.items():
+            if has_token(entry) or (isinstance(entry, list) and any(has_token(row) for row in entry)):
+                connected.add(_identity(pid))
+    return connected & _oauth_ids()
+
+
 def _builtin_templates(env):
     """Local registry metadata only: never authenticate or fetch a catalog here."""
     try:
@@ -48,7 +82,8 @@ def _builtin_templates(env):
     from api.providers import _PROVIDER_ENV_VAR_ALIASES
     result = {}
     for raw_id, provider in PROVIDER_REGISTRY.items():
-        if getattr(provider, "auth_type", "") != "api_key":
+        oauth = str(getattr(provider, "auth_type", "")).startswith("oauth")
+        if getattr(provider, "auth_type", "") != "api_key" and not oauth:
             continue
         pid = _identity(raw_id)
         if config._is_native_custom_provider_key(pid):
@@ -56,12 +91,13 @@ def _builtin_templates(env):
             # a built-in without silently changing its runtime identity.
             continue
         names = tuple(getattr(provider, "api_key_env_vars", ()) or ()) + _PROVIDER_ENV_VAR_ALIASES.get(pid, ())
-        if not names or pid in result:
+        if (not names and not oauth) or pid in result:
             continue
-        key_env = next((name for name in names if env.get(name)), names[0])
+        key_env = next((name for name in names if env.get(name)), names[0] if names else "")
         base = env.get(getattr(provider, "base_url_env_var", "")) or getattr(provider, "inference_base_url", "")
+        models = {row["id"]: {} for row in config._PROVIDER_MODELS.get(pid, [])} if oauth else {}
         result[pid] = {"name": getattr(provider, "name", pid), "base_url": base,
-                       "key_env": key_env, "models": {}, "discover_models": False,
+                       "key_env": key_env, "models": models, "discover_models": oauth,
                        "enabled": True}
     return result
 
@@ -86,7 +122,7 @@ def _templates_for(data, env):
             if isinstance(default, str) and default.strip():
                 # A fixed catalog's first Save must not silently drop the
                 # profile's existing default before deletion guards see it.
-                entry["models"] = {default: {}}
+                entry.setdefault("models", {})[default] = entry.get("models", {}).get(default, {})
     return templates
 
 
@@ -151,7 +187,9 @@ def _snapshot(path, profile):
     # Key rotation, home replacement and profile switching invalidate drafts,
     # without returning any credential or credential fingerprint to the client.
     env_identity = f"{home.resolve()}\0{env_path.resolve()}\0".encode() + json.dumps(env, sort_keys=True).encode()
-    revision = hashlib.sha256(identity + raw + b"\0" + env_identity).hexdigest()
+    auth_identity = json.dumps(config._auth_store_semantic_fingerprint(home / "auth.json"), sort_keys=True).encode()
+    login_presence = json.dumps(sorted(_profile_oauth_ids())).encode()
+    revision = hashlib.sha256(identity + raw + b"\0" + env_identity + b"\0" + auth_identity + b"\0" + login_presence).hexdigest()
     return data, revision, env
 
 
@@ -221,6 +259,26 @@ def _models(entry):
     return result
 
 
+def _runtime_owner(data, source, key, entry):
+    pid = _provider_id(source, key, entry)
+    if not pid.startswith("custom:"):
+        return True
+    selected = config._normalized_raw_provider_record(entry, str(key)) if source == "providers" else entry
+    try:
+        owned, owned_source, _, _ = config._select_custom_provider_record(pid, config._custom_provider_slug_key(pid), data)
+    except ValueError:
+        return False
+    return owned is not None and owned_source == source and owned == selected
+
+
+def _record_discovery_allowed(entry):
+    if not config._provider_discover_allowed(entry):
+        return False
+    if config._provider_models_are_discovered_catalog(entry):
+        return True
+    return not (isinstance(entry.get("models"), (list, str)) and bool(_models(entry)))
+
+
 def _view(data, revision, path, profile, env):
     entries = []
     templates = _templates_for(data, env)
@@ -228,9 +286,12 @@ def _view(data, revision, path, profile, env):
     rows = list(_records(data))
     owned = {_identity(_provider_id(source, key, row)) for _, source, key, row in rows}
     from api.providers import _provider_value_counts_as_api_key
+    active = _identity((data.get("model") or {}).get("provider", "")) if isinstance(data.get("model"), dict) else ""
+    oauth_ids = _oauth_ids()
+    connected_oauth = _profile_oauth_ids()
     rows += [("builtin:" + pid, "builtin", pid, entry) for pid, entry in templates.items()
              if pid not in owned and pid not in removed
-             and _provider_value_counts_as_api_key(pid, env.get(entry["key_env"]))]
+             and (_provider_value_counts_as_api_key(pid, env.get(entry["key_env"])) or pid == active or pid in connected_oauth)]
     for ref, source, key, entry in rows:
         pid = _provider_id(source, key, entry)
         if not pid:
@@ -244,13 +305,15 @@ def _view(data, revision, path, profile, env):
         headers = entry.get("extra_headers")
         entries.append({
             "ref": ref, "source": source, "provider_id": pid, "canonical_id": _identity(pid),
+            "is_oauth": _identity(pid) in oauth_ids,
+            "runtime_visible": _runtime_owner(data, source, key, entry),
             "name": str(entry.get("display_name") or entry.get("name") or key),
             "base_url": base_url, "base_url_redacted": redacted,
             "api_mode": config._custom_record_api_mode(entry) or "",
             "enabled": config._raw_provider_record_enabled(entry),
-            "discover_models": entry.get("discover_models") is not False,
+            "discover_models": _record_discovery_allowed(entry),
             "default_model": str(entry.get("default_model") or entry.get("model") or ""),
-            "credential_configured": bool(raw_key or key_ref or entry.get("key_cmd") or entry.get("credential_pool")),
+            "credential_configured": bool(raw_key or key_ref or entry.get("key_cmd") or entry.get("credential_pool") or _identity(pid) in connected_oauth),
             "key_env": key_ref,
             "headers": [{"name": str(name), "configured": True} for name in headers] if isinstance(headers, dict) else [],
             "models": _models(entry),
@@ -268,10 +331,11 @@ def _view(data, revision, path, profile, env):
 def _project_template(pid, entry, env):
     base, redacted = _public_url(entry.get("base_url"))
     return {"ref": "builtin:" + pid, "source": "builtin", "provider_id": pid, "canonical_id": pid,
+            "is_oauth": pid in _oauth_ids(),
             "aliases": [alias for alias, target in config._PROVIDER_ALIASES.items() if _identity(target) == pid],
             "name": entry.get("name", pid), "base_url": base, "base_url_redacted": redacted,
             "api_mode": entry.get("api_mode", ""), "enabled": True,
-            "discover_models": False, "default_model": "", "models": _models(entry),
+            "discover_models": entry.get("discover_models") is not False, "default_model": "", "models": _models(entry),
             "headers": [{"name": name, "configured": True} for name in entry.get("extra_headers", {})],
             "key_env": entry["key_env"], "credential_configured": bool(env.get(entry["key_env"]))}
 
@@ -379,6 +443,10 @@ def _patch(entry, changes, source, data, pid):
     allowed = {"name", "base_url", "api_mode", "enabled", "discover_models", "default_model", "models", "key_env"}
     if not isinstance(changes, dict) or set(changes) - allowed:
         raise EditorError("Unsupported provider field.")
+    if "models" in changes and "discover_models" not in changes and not _record_discovery_allowed(entry) and config._provider_discover_allowed(entry):
+        # Preserve the fixed meaning of an implicit legacy allowlist even
+        # after its last model is removed.
+        entry["discover_models"] = False
     for field, value in changes.items():
         if field == "models":
             continue
@@ -421,6 +489,10 @@ def _patch(entry, changes, source, data, pid):
             entry.pop(target, None)
         else:
             entry[target] = value
+        if field == "discover_models" and value is True and isinstance(entry.get("models"), (list, str)):
+            # Reuse Hermes' persisted-discovery marker when explicitly opting
+            # a legacy list allowlist into following the endpoint.
+            entry["models_discovered"] = True
     if "models" in changes:
         _patch_models(entry, changes["models"], data, pid)
 
@@ -595,7 +667,8 @@ def discovery_record(body):
         # Validate the same identity the runtime would use. A shadowed native
         # row must never probe with a legacy row's credential (or vice versa).
         pid = _provider_id(source, key, entry)
-        if source == "builtin" and (_identity(pid) in _removed(data) or not env.get(entry.get("key_env"))):
+        oauth = _identity(pid) in _oauth_ids()
+        if source == "builtin" and (_identity(pid) in _removed(data) or (not oauth and not env.get(entry.get("key_env")))):
             raise EditorError("Add and save this provider before fetching models.", 409)
         selected = config._normalized_raw_provider_record(entry, str(key)) if source == "providers" else entry
         if pid.startswith("custom:"):
@@ -606,6 +679,12 @@ def discovery_record(body):
             if owned is None or owned_source != source or owned != selected:
                 raise EditorError("This record is disabled, ambiguous, or shadowed by another provider store.", 409)
         selected = copy.deepcopy(selected)
+        if oauth:
+            expected = _templates_for(data, env).get(_identity(pid), {}).get("base_url", "")
+            actual = selected.get("base_url") or expected
+            if _public_url(actual)[1] or (actual.rstrip("/") != str(expected).rstrip("/")) or selected.get("extra_headers") or selected.get("key_cmd"):
+                raise EditorError("This OAuth connection override needs Hermes CLI discovery; its credential destination cannot be verified here.", 409)
+            selected["oauth_provider"] = pid
         if selected.get("key_env") in env and not selected.get("api_key"):
             selected["api_key"] = env[selected["key_env"]]
         return selected

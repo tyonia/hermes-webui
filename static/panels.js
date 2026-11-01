@@ -7568,6 +7568,7 @@ async function switchToProfile(name) {
     if (typeof _clearEmptyComposerModelOverride === 'function') _clearEmptyComposerModelOverride();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if(typeof window._invalidateManagedModelCatalog==='function') window._invalidateManagedModelCatalog();
     if(typeof window!=='undefined'&&window.HermesProviderManager) window.HermesProviderManager.profileChanged(S.activeProfile);
     // The switch's optimistic chip already claims the new profile, but the
     // localStorage hidden_tabs / tab_order mirror still holds the PREVIOUS
@@ -12709,6 +12710,7 @@ async function _saveSelfHostedProvider(providerId){
 // loaded yet (e.g. during early Settings open) cannot break the save flow.
 function _refreshModelDropdownsAfterProviderChange(){
   try{
+    if(typeof window._invalidateManagedModelCatalog==='function') window._invalidateManagedModelCatalog();
     if(typeof window._invalidateSlashModelCache==='function'){
       window._invalidateSlashModelCache();
     }

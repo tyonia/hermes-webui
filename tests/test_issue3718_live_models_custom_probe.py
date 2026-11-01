@@ -30,6 +30,14 @@ import types
 from urllib.parse import urlparse
 
 import pytest
+import yaml
+
+
+@pytest.fixture(autouse=True)
+def durable_profile(monkeypatch, tmp_path):
+    from api import config, profiles
+    monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "config.yaml")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
 
 def _install_provider_model_ids(monkeypatch, fn):
@@ -84,6 +92,7 @@ def _run_live_models(monkeypatch, routes, custom_provider, *, catalog, fail=Fals
         "model": {"provider": "custom:test-gateway"},
         "custom_providers": [custom_provider],
     }
+    config._get_config_path().write_text(yaml.safe_dump(config_data, sort_keys=False))
     monkeypatch.setattr(config, "get_config", lambda: config_data)
     monkeypatch.setattr(routes, "cfg", config_data, raising=False)
 
@@ -106,6 +115,7 @@ _LIVE_CATALOG = [
     "image-gen-1",   # non-chat noise the picker must not surface
     "audio-tts-1",
 ]
+_CHAT_CATALOG = ["chat-a", "chat-b"]
 
 _BASE_PROVIDER = {
     "name": "Test Gateway",
@@ -140,7 +150,7 @@ def test_allowlist_filters_live_catalog(monkeypatch, models_value):
         monkeypatch, routes, provider, catalog=_LIVE_CATALOG
     )
 
-    assert requested, "live /v1/models probe was never attempted"
+    assert not requested, "fixed catalogs must not query upstream"
     assert _ids(payload) == ["chat-a", "chat-b"]
     assert "image-gen-1" not in _ids(payload)
     assert "audio-tts-1" not in _ids(payload)
@@ -166,7 +176,7 @@ def test_dict_models_without_discover_false_does_not_gate(monkeypatch):
     )
 
     assert requested, "live /v1/models probe was never attempted"
-    assert _ids(payload) == _LIVE_CATALOG, (
+    assert _ids(payload) == _CHAT_CATALOG, (
         "dict-shaped models is per-model metadata, not an allowlist — the "
         "full live catalog must be surfaced"
     )
@@ -189,7 +199,7 @@ def test_dict_models_with_discover_false_pins_to_keys(monkeypatch):
         payload, requested = _run_live_models(
             monkeypatch, routes, provider, catalog=_LIVE_CATALOG
         )
-        assert requested, "live /v1/models probe was never attempted"
+        assert not requested, "fixed catalogs must not query upstream"
         assert _ids(payload) == ["chat-a", "chat-b"], (
             f"discover_models={discover!r} must pin the dict keys as the allowlist"
         )
@@ -206,7 +216,7 @@ def test_singular_model_only_does_not_gate_live_catalog(monkeypatch):
         monkeypatch, routes, provider, catalog=_LIVE_CATALOG
     )
 
-    assert _ids(payload) == _LIVE_CATALOG
+    assert _ids(payload) == _CHAT_CATALOG
 
 
 def test_malformed_serialized_models_is_safe(monkeypatch):
@@ -303,7 +313,7 @@ def test_empty_allowlist_is_treated_as_not_configured(monkeypatch, models_value)
         monkeypatch, routes, provider, catalog=_LIVE_CATALOG
     )
 
-    assert _ids(payload) == _LIVE_CATALOG, (
+    assert _ids(payload) == _CHAT_CATALOG, (
         "empty allowlist must fall through to full live discovery, "
         "never collapse the picker to zero models"
     )
