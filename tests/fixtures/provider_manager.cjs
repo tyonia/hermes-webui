@@ -34,6 +34,8 @@ let savedBuiltin = false;
 let keyedBuiltin = false;
 let removedBuiltin = false;
 let builtinModels = [];
+let gatewayDefault = '';
+let gatewayModels = [{id: 'vendor/model:free', original_id: 'vendor/model:free', label: 'Selected model', context_length: 8192}];
 const posts = [];
 let delayManaged = false;
 let finishManaged = null;
@@ -47,7 +49,7 @@ const view = () => ({profile, revision: 'revision', config_path: '/fixture/confi
   catalog: [{...builtin(), ref: 'builtin:opencode-go', models: []}], providers: emptyProfile ? [] : [{
   ref: 'providers:custom:relay', source: 'providers', provider_id: 'custom:relay', name: 'Gateway',
   base_url: 'https://fixture.invalid/v1', api_mode: '', enabled: true, discover_models: false,
-  default_model: '', key_env: '', headers: [], models: [{id: 'vendor/model:free', original_id: 'vendor/model:free', label: 'Selected model', context_length: 8192}],
+  default_model: gatewayDefault, key_env: '', headers: [], models: gatewayModels,
 }].concat(keyedBuiltin && !removedBuiltin ? [builtin()] : [])});
 const window = {addEventListener() {}, confirm: () => true};
 const context = {window, document, console, t: key => key,
@@ -61,6 +63,11 @@ const context = {window, document, console, t: key => key,
     if (path === '/api/provider-manager') {
       if (options) {
         const body = JSON.parse(options.body); posts.push(body);
+        if (body.ref === 'providers:custom:relay') {
+          gatewayDefault = body.changes?.default_model ?? gatewayDefault;
+          gatewayModels = body.changes?.models || gatewayModels;
+          return {...view(), saved_ref: body.ref};
+        }
         removedBuiltin = body.op === 'delete';
         if (!removedBuiltin) { savedBuiltin = true; builtinModels = body.changes?.models || builtinModels; }
         return {...view(), saved_ref: removedBuiltin ? body.ref : 'providers:opencode-go'};
@@ -198,5 +205,43 @@ const button = text => root.walk().find(e => e.tagName === 'BUTTON' && e.textCon
   await window.HermesProviderManager.mount(root);
   assert.ok(!tree().textContent.includes('OpenCode Go'), 'another profile must not inherit a configured card');
   assert.ok(!window.HermesProviderManager.searchEntries().some(e => e.pmRef === 'builtin:opencode-go'));
+  gatewayDefault = 'vendor/model:free'; root = new Element('div');
+  await window.HermesProviderManager.mount(root);
+  button('Selected model').listeners.click(); button('pm_delete_model').listeners.click();
+  assert.equal(button('pm_fetch_models').disabled, false, 'model-only drafts must still fetch the saved connection');
+  const fetching = button('pm_fetch_models').listeners.click();
+  assert.equal(root.walk().find(e => e.tagName === 'FIELDSET').disabled, true, 'connection fields are locked while fetching');
+  await fetching;
+  assert.equal(root.walk().find(e => e.tagName === 'FIELDSET').disabled, false);
+  assert.equal(posts.at(-1).ref, 'providers:custom:relay');
+  assert.equal(posts.at(-1).changes, undefined, 'discovery never sends draft endpoint/credential changes');
+  button('pm_select_shown').listeners.click(); button('pm_import_selected').listeners.click();
+  const defaultLabel = root.walk().find(e => e.tagName === 'LABEL' && e.textContent === 'pm_provider_default');
+  const defaultSelect = root.walk().find(e => e.id === defaultLabel.htmlFor);
+  assert.equal(defaultSelect.tagName, 'SELECT', 'provider default must be a visible model choice');
+  assert.equal(defaultSelect.value, 'vendor/model:free', 'deleting must not silently clear the default');
+  assert.ok(defaultSelect.children.some(e => e.value === 'fixture/discovered:free'), 'new imports must populate the default picker without losing discovery');
+  const beforeSave = posts.length;
+  await button('pm_save').listeners.click();
+  assert.equal(posts.length, beforeSave, 'a missing default must ask for an explicit replacement before saving');
+  defaultSelect.value = 'fixture/discovered:free'; defaultSelect.listeners.change();
+  const urlLabel = root.walk().find(e => e.tagName === 'LABEL' && e.textContent === 'Base URL');
+  const urlInput = root.walk().find(e => e.id === urlLabel.htmlFor);
+  urlInput.value = 'https://changed.invalid/v1'; urlInput.listeners.input();
+  assert.equal(button('pm_fetch_models').disabled, true, 'connection changes must be saved first');
+  urlInput.value = 'https://fixture.invalid/v1'; urlInput.listeners.input();
+  assert.equal(button('pm_fetch_models').disabled, false, 'restoring the saved connection must allow fetch despite a dirty model draft');
+  await button('pm_save').listeners.click();
+  assert.equal(posts.at(-1).changes.default_model, 'fixture/discovered:free');
+  assert.equal(posts.at(-1).changes.models[0].id, 'fixture/discovered:free');
+  gatewayDefault = 'upstream-only-default'; root = new Element('div');
+  await window.HermesProviderManager.mount(root);
+  const currentNameLabel = root.walk().find(e => e.tagName === 'LABEL' && e.textContent === 'pm_name');
+  const currentName = root.walk().find(e => e.id === currentNameLabel.htmlFor);
+  currentName.value = 'Edited label'; currentName.listeners.input();
+  const beforeLabelSave = posts.length;
+  await button('pm_save').listeners.click();
+  assert.equal(posts.length, beforeLabelSave + 1, 'an unlisted default that was not deleted must not block unrelated edits');
+  assert.equal(posts.at(-1).changes.default_model, undefined);
   console.log('PASS selection refresh and profile draft isolation');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -65,6 +65,14 @@ not edited by the form is preserved. List/serialized-list allowlists remain
 list shaped; mapping metadata remains mapping shaped. The user explicitly
 chooses fixed catalog vs discovery mode through `discover_models`.
 
+The provider default is a visible model picker in the Models section (and model
+detail), rather than a hidden advanced text field. Deleting a model that is still
+this default asks for an explicit replacement or clearing the default. Imported
+IDs immediately update the picker without discarding the draft/discovery results.
+Both the replacement and model-list edits are patched in the same existing YAML
+transaction. Unlisted defaults that were not deleted remain supported; profile,
+auxiliary and fallback references retain their existing deletion protections.
+
 API keys and request-header values use explicit keep/replace/remove operations.
 Choosing a credential environment variable replaces the record's other
 credential declarations; its value is never returned. API providers use the common
@@ -111,6 +119,10 @@ New Add drafts require Save before discovery; profile-key-backed templates can
 discover without a preliminary YAML write. Their endpoint honors that profile's
 explicit URL environment override or active model relay, and their key is resolved
 from the captured profile environment, never an ambient or other-profile key.
+Model-list, label, catalog-mode and default-model drafts may remain unsaved while
+fetching: discovery still uses only the saved owner, endpoint and credentials.
+Unsaved URL/protocol/enablement/credential/header changes block Fetch with a visible
+reason until saved or restored. The form is disabled while a fetch is in flight.
 Search/select/import
 changes only the draft; Save commits it. Results from a superseded selection
 are ignored. Navigation is locked during an in-flight mutation, and drafts

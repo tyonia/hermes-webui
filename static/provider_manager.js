@@ -140,10 +140,58 @@
       this.updateActions();
     }
     updateActions() {
+      this.updateProviderDefault();
       if (this.save) this.save.disabled = !this.dirty || this.busy || this.stale;
-      if (this.discoverButton) this.discoverButton.disabled = this.dirty || this.busy || this.stale || !this.current.enabled || this.current.isNew;
+      const blocked = this.discoveryBlocked();
+      if (this.discoverButton) {
+        this.discoverButton.disabled = !!blocked;
+        this.discoverButton.title = blocked ? tr(blocked) : tr('fetch_hint');
+      }
+      if (this.fetchHint) this.fetchHint.textContent = tr(blocked || 'fetch_hint');
       for (const control of this.root.querySelectorAll('[data-pm-persist]')) control.disabled = this.busy || this.stale || this.dirty;
       this.root.setAttribute('aria-busy', String(this.busy));
+    }
+    discoveryBlocked() {
+      const draft = this.current;
+      if (!draft || draft.managed || draft.isNew || draft.fromCatalog) return 'fetch_save_first';
+      if (this.busy) return 'fetching';
+      if (this.stale) return 'stale';
+      if (!draft.enabled) return 'fetch_enable_first';
+      if (['base_url', 'api_mode', 'enabled'].some(key => draft[key] !== draft.baseline[key]) ||
+          draft.credential.action !== 'keep' || draft.headerDrafts.some(header => header.action !== 'keep')) return 'fetch_connection_save';
+      return '';
+    }
+    providerDefaultRemoved() {
+      const draft = this.current;
+      return !!draft?.default_model && (draft.baseline.models || []).some(model => model.id === draft.default_model) &&
+        !draft.models.some(model => model.id === draft.default_model);
+    }
+    updateProviderDefault() {
+      if (!this.providerDefaultSelect) return;
+      const draft = this.current;
+      const ids = [...new Set(draft.models.map(model => model.id).filter(Boolean))];
+      const options = [['', tr('no_provider_default')], ...ids.map(id => [id, id])];
+      if (draft.default_model && !ids.includes(draft.default_model)) options.push([draft.default_model, draft.default_model + ' (' + tr('not_in_list') + ')']);
+      const signature = JSON.stringify(options);
+      if (this.providerDefaultSelect.dataset.options !== signature) {
+        this.providerDefaultSelect.replaceChildren(...options.map(([value, label]) => {
+          const option = node('option', '', label); option.value = value; return option;
+        }));
+        this.providerDefaultSelect.dataset.options = signature;
+      }
+      this.providerDefaultSelect.value = draft.default_model || '';
+      this.providerDefaultWarning.hidden = !this.providerDefaultRemoved();
+      this.providerDefaultWarning.textContent = this.providerDefaultRemoved() ? tr('replace_provider_default') : '';
+    }
+    renderProviderDefault(host) {
+      const control = field(tr('provider_default'), this.current.default_model, value => {
+        this.current.default_model = value; this.markDirty();
+      }, {options: [], hint: tr('provider_default_hint')});
+      this.providerDefaultSelect = control.querySelector('select');
+      this.providerDefaultWarning = node('p', 'pm-error');
+      this.providerDefaultWarning.setAttribute('role', 'status');
+      host.append(control, this.providerDefaultWarning);
+      this.updateProviderDefault();
     }
     canLeave() { return !this.dirty || window.confirm(tr('discard')); }
     select(ref, index = null) {
@@ -259,6 +307,9 @@
       this.detail.replaceChildren();
       this.save = null;
       this.discoverButton = null;
+      this.fetchHint = null;
+      this.providerDefaultSelect = null;
+      this.providerDefaultWarning = null;
       this.providerTypeSelect = null;
       const current = this.current;
       if (!current) { this.detail.append(node('p', 'pm-empty', tr('empty'))); return; }
@@ -345,16 +396,17 @@
         this.detail.querySelector('input')?.focus();
       }));
       modelSection.append(modelHead);
+      this.renderProviderDefault(modelSection);
       modelSection.append(field(tr('catalog_mode'), String(draft.discover_models), value => set('discover_models', value === 'true'), {options: [['false', tr('fixed_catalog')], ['true', tr('follow_catalog')]], hint: tr('catalog_hint')}));
       this.discoverButton = button(tr('fetch_models'), () => this.fetchModels());
-      modelSection.append(this.discoverButton, node('p', 'pm-muted', tr('fetch_hint')));
+      this.fetchHint = node('p', 'pm-muted', tr('fetch_hint'));
+      modelSection.append(this.discoverButton, this.fetchHint);
       this.discoveryHost = node('div', 'pm-discovery');
       modelSection.append(this.discoveryHost);
       this.form.append(modelSection);
       if (this.discovery) this.renderDiscovery();
       const advanced = node('details', 'pm-section');
       advanced.append(node('summary', '', tr('advanced')));
-      advanced.append(field(tr('provider_default'), draft.default_model, value => set('default_model', value)));
       advanced.append(field(tr('enabled'), String(draft.enabled), value => set('enabled', value === 'true'), {options: [['true', tr('enabled')], ['false', tr('disabled')]]}));
       advanced.append(node('h4', '', tr('headers')));
       const headers = node('div', 'pm-headers');
@@ -388,6 +440,7 @@
         this.markDirty(); this.renderSidebar(); this.renderDetail();
       }, 'pm-danger'));
       this.form.append(actions, node('p', 'pm-muted', tr('default_hint')));
+      this.renderProviderDefault(this.form);
     }
     renderManaged(provider) {
       const head = node('div', 'pm-heading');
@@ -409,6 +462,11 @@
     }
     async persist() {
       if (this.busy || this.stale) return;
+      if (this.providerDefaultRemoved()) {
+        this.message(tr('replace_provider_default'), true);
+        this.providerDefaultSelect?.focus();
+        return;
+      }
       const draft = this.current;
       const changes = {};
       for (const key of ['name', 'base_url', 'api_mode', 'enabled', 'discover_models', 'default_model', 'models']) {
@@ -460,10 +518,11 @@
       await this.mutate({...this.payload('default'), model});
     }
     async fetchModels() {
-      if (this.busy || this.dirty || this.stale || this.current.isNew) return;
+      if (this.discoveryBlocked()) return;
       const selected = this.current;
       const generation = ++this.generation;
       this.busy = true; this.updateActions();
+      if (this.form) this.form.disabled = true;
       this.message(tr('fetching'));
       try {
         const result = await api('/api/provider-manager/discover', {method: 'POST', body: JSON.stringify(this.payload()), timeoutMs: 20000});
@@ -471,7 +530,7 @@
         this.discovery = {models: result.models || [], selected: new Set(), query: ''};
         this.renderDiscovery(); this.message(tr('choose_models'));
       } catch (error) { if (generation === this.generation) this.message(error.message, true); }
-      finally { if (generation === this.generation) { this.busy = false; this.updateActions(); } }
+      finally { if (generation === this.generation) { this.busy = false; if (this.form) this.form.disabled = false; this.updateActions(); } }
     }
     renderDiscovery() {
       const state = this.discovery;

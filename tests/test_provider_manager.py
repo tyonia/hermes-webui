@@ -491,6 +491,23 @@ def test_profile_default_survives_first_builtin_catalog_save(keyed_builtin):
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("replacement", ["replacement-model", ""])
+def test_replace_models_and_provider_default_in_one_save(store, legacy, replacement):
+    path, data, _ = store
+    entry = data["providers"]["custom:relay"]
+    entry["model" if legacy else "default_model"] = "vendor/model:free"
+    if legacy:
+        data["custom_providers"] = [{**data["providers"].pop("custom:relay"), "name": "relay"}]
+    path.write_text(yaml.safe_dump(data))
+    editor.write_editor(operation(changes={"default_model": replacement, "models": [{"id": "replacement-model"}]}))
+    saved = raw(path)
+    record = saved["custom_providers"][0] if legacy else saved["providers"]["custom:relay"]
+    assert list(record["models"]) == ["replacement-model"]
+    assert (record.get("model") if legacy else record.get("default_model")) == (replacement or None)
+    assert saved["model"] == data["model"]
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFO")
 def test_non_regular_config_is_refused_without_blocking(store, tmp_path, monkeypatch):
     pipe = tmp_path / "config.fifo"
