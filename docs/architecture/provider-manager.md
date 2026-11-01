@@ -19,13 +19,16 @@ returns a redacted projection. Invalid YAML and dangling links refuse editing.
 Disabled records remain visible so they can be enabled again. Unknown fields
 and credential values are not included in the projection.
 
-The sidebar and global settings search list only records owned by this profile's
-YAML config, including explicitly stored built-in records. Catalog-only built-in,
-OAuth, plugin and local providers are offered through **Add provider → Provider
-type**, regardless of credential status. Opening one there keeps its authentication
-and default-model controls available without pinning it into the sidebar or
-deleting credentials. An empty profile starts with an empty editor; delayed
-catalog responses update the Add picker without replacing a draft.
+The sidebar and global settings search list records owned by this profile's YAML
+config, including explicitly stored built-in records, plus managed providers with
+an explicit API key in this profile's `.env` (`key_source: env_file` from the
+profile-scoped `/api/providers` response). YAML records take precedence so each
+provider appears once. Ambient environment keys and automatic OAuth/local
+availability alone do not pin a provider. Catalog-only built-in, OAuth, plugin
+and local providers remain available through **Add provider → Provider type**.
+Opening one there keeps its authentication and default-model controls available
+without pinning it or deleting credentials. An empty profile starts with an empty
+editor; delayed catalog responses update the Add picker without replacing a draft.
 The editor module asset revision is kept in sync between `index.html` and the
 service worker so a frontend-only update can load without restarting the backend.
 
@@ -78,8 +81,10 @@ does not write config, start an agent session, or send a completion.
 The model list request uses a 10-second timeout, a 2-MiB response limit and
 at most 2000 unique model IDs. It supports OpenAI-compatible and Anthropic
 model-list endpoints, local/keyless endpoints, and static/environment-referenced
-credentials. It refuses redirects and ignores ambient HTTP proxies, including
-for local model servers. Errors do not echo upstream bodies or credential
+credentials. Requests identify the client as `HermesWebUI/1.0` rather than urllib's
+default, which some catalogs reject with HTTP 403. Explicit request headers take
+precedence, matching names case-insensitively. It refuses redirects and ignores
+ambient HTTP proxies, including for local model servers. Errors do not echo upstream bodies or credential
 values. Command-based keys and credential pools remain preserved but are not
 executed by discovery; use Hermes CLI discovery for those configurations.
 

@@ -63,7 +63,13 @@ def discover(body):
             headers[name] = key if mode == "anthropic_messages" else "Bearer " + key
     if mode == "anthropic_messages" and "anthropic-version" not in names:
         headers["anthropic-version"] = "2023-06-01"
-    headers.setdefault("Accept", "application/json")
+    if "accept" not in names:
+        headers["Accept"] = "application/json"
+    # Some catalogs (including OpenCode Go) reject Python-urllib's default
+    # User-Agent. Identify this client while honoring saved headers, with
+    # case-insensitive names just like the authentication headers above.
+    if "user-agent" not in names:
+        headers["User-Agent"] = "HermesWebUI/1.0"
     # These are deliberate requests to the saved endpoint, including local/LAN
     # model servers. Never route them through an ambient HTTP proxy or forward
     # credentials to a redirect destination.

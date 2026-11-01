@@ -224,6 +224,12 @@
       this.renderSidebar();
       this.renderDetail();
     }
+    configuredManaged() {
+      const owned = new Set(this.view.providers.map(p => p.provider_id));
+      // has_key alone includes ambient credentials and automatic OAuth status.
+      // env_file identifies an explicit key in this request profile's .env.
+      return this.managed.filter(p => !owned.has(p.id) && p.has_key && p.key_source === 'env_file');
+    }
     renderSidebar() {
       this.tree.replaceChildren();
       const query = this.query.toLowerCase().trim();
@@ -246,6 +252,14 @@
           item.setAttribute('aria-current', String(selected && this.index === index));
           this.tree.append(item);
         }
+      }
+      for (const provider of this.configuredManaged()) {
+        if (query && ![provider.display_name, provider.id].some(s => s.toLowerCase().includes(query))) continue;
+        count++;
+        const ref = 'managed:' + provider.id;
+        const item = button(provider.display_name, () => this.select(ref), 'pm-provider-row');
+        item.setAttribute('aria-current', String(this.current?.ref === ref));
+        this.tree.append(item);
       }
       if (!count) this.tree.append(node('p', 'pm-empty', tr('no_matches')));
     }
@@ -499,10 +513,13 @@
     profileChanged(name) { if (instance) instance.profileChanged(name); },
     searchEntries() {
       if (!instance?.view || instance.stale) return [];
-      return instance.view.providers.flatMap(provider => [
+      const saved = instance.view.providers.flatMap(provider => [
         {label: provider.name, searchBlob: provider.name + ' ' + provider.provider_id, pmRef: provider.ref},
         ...provider.models.map((model, index) => ({label: provider.name + ' / ' + (model.label || model.id), searchBlob: provider.name + ' ' + provider.provider_id + ' ' + model.id + ' ' + model.label, pmRef: provider.ref, pmModelIndex: index})),
       ]);
+      return saved.concat(instance.configuredManaged().map(provider => ({
+        label: provider.display_name, searchBlob: provider.display_name + ' ' + provider.id, pmRef: 'managed:' + provider.id,
+      })));
     },
     reveal(ref, index) {
       if (!instance || instance.stale) return null;

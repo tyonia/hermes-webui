@@ -30,13 +30,18 @@ const document = {activeElement: null, createElement: tag => new Element(tag), g
 let profile = 'default';
 let managed = [];
 let emptyProfile = false;
+let savedBuiltin = false;
 let delayManaged = false;
 let finishManaged = null;
 const view = () => ({profile, revision: 'revision', config_path: '/fixture/config.yaml', warnings: [], providers: emptyProfile ? [] : [{
   ref: 'providers:custom:relay', source: 'providers', provider_id: 'custom:relay', name: 'Gateway',
   base_url: 'https://fixture.invalid/v1', api_mode: '', enabled: true, discover_models: false,
   default_model: '', key_env: '', headers: [], models: [{id: 'vendor/model:free', original_id: 'vendor/model:free', label: 'Selected model', context_length: 8192}],
-}]});
+}].concat(savedBuiltin ? [{
+  ref: 'providers:opencode-go', source: 'providers', provider_id: 'opencode-go', name: 'OpenCode Go',
+  base_url: 'https://opencode.ai/zen/go/v1', api_mode: 'chat_completions', enabled: true,
+  key_env: '', headers: [], models: [],
+}] : [])});
 const window = {addEventListener() {}, confirm: () => true};
 const context = {window, document, console, t: key => key,
   _buildProviderCard: provider => { const card = new Element('div'); card.textContent = 'Configured: ' + provider.has_key; return card; },
@@ -78,8 +83,8 @@ const button = text => root.walk().find(e => e.tagName === 'BUTTON' && e.textCon
   // Authenticated, OAuth and local built-ins stay in the Add picker; reading
   // or selecting them must not pin them into this profile's saved tree.
   managed = [
-    {id: 'copilot', display_name: 'GitHub Copilot', is_oauth: true, has_key: true, models: []},
-    {id: 'openai', display_name: 'OpenAI', configurable: true, has_key: true, models: []},
+    {id: 'copilot', display_name: 'GitHub Copilot', is_oauth: true, has_key: true, key_source: 'oauth', models: []},
+    {id: 'openai', display_name: 'OpenAI', configurable: true, has_key: true, key_source: 'env_var', models: []},
     {id: 'ollama', display_name: 'Ollama', is_self_hosted: true, has_key: false, models: []},
   ];
   root = new Element('div');
@@ -115,5 +120,31 @@ const button = text => root.walk().find(e => e.tagName === 'BUTTON' && e.textCon
   finishManaged(); await new Promise(resolve => setImmediate(resolve));
   assert.ok(pendingPicker.textContent.includes('GitHub Copilot'), 'late catalog must populate an already open Add picker');
   assert.equal(draftId.value, 'retained-new-id', 'late catalog must preserve typed provider settings');
+  // Profile-owned .env keys are configured providers even without YAML rows.
+  // Ambient/OAuth availability above must still not pin unrelated built-ins.
+  delayManaged = false; emptyProfile = false;
+  managed.push({id: 'opencode-go', display_name: 'OpenCode Go', configurable: true,
+    has_key: true, key_source: 'env_file', models: []});
+  for (const name of ['default', 'ophelia', 'sisyphus']) {
+    profile = name; savedBuiltin = name === 'sisyphus'; root = new Element('div');
+    await window.HermesProviderManager.mount(root);
+    const matches = tree().walk().filter(e => e.tagName === 'BUTTON' && e.textContent.startsWith('OpenCode Go'));
+    assert.equal(matches.length, 1, `${name}: show the configured provider exactly once`);
+    const search = window.HermesProviderManager.searchEntries().filter(e => e.label === 'OpenCode Go');
+    assert.equal(search.length, 1);
+    assert.equal(search[0].pmRef, savedBuiltin ? 'providers:opencode-go' : 'managed:opencode-go');
+    matches[0].listeners.click();
+    assert.equal(heading(), 'OpenCode Go');
+    assert.ok(!tree().textContent.includes('GitHub Copilot'));
+  }
+  savedBuiltin = false;
+  managed = managed.map(p => p.id === 'opencode-go' ? {...p, has_key: false, key_source: 'none'} : p);
+  await window.HermesProviderManager.mount(root);
+  assert.ok(!tree().textContent.includes('OpenCode Go'), 'removing the profile key must remove the managed sidebar row');
+  managed = managed.filter(p => p.id !== 'opencode-go');
+  profile = 'no-key-profile'; root = new Element('div');
+  await window.HermesProviderManager.mount(root);
+  assert.ok(!tree().textContent.includes('OpenCode Go'), 'another profile must not inherit a configured card');
+  assert.ok(!window.HermesProviderManager.searchEntries().some(e => e.pmRef === 'managed:opencode-go'));
   console.log('PASS selection refresh and profile draft isolation');
 })().catch(error => { console.error(error); process.exitCode = 1; });

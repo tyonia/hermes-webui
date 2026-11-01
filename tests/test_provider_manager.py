@@ -276,7 +276,8 @@ def test_new_default_guard_rejects_intervening_write(store, monkeypatch):
         editor.write_editor(operation("default", model="vendor/model:free"))
 
 
-def test_discovery_probes_only_saved_owner_with_no_redirects(store):
+@pytest.mark.parametrize("user_agent_header", [None, "User-Agent", "user-agent"])
+def test_discovery_probes_only_saved_owner_with_no_redirects(store, user_agent_header):
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from api.provider_manager_probe import discover
@@ -285,6 +286,13 @@ def test_discovery_probes_only_saved_owner_with_no_redirects(store):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             requests.append((self.path, self.headers.get("Authorization"), self.headers.get("X-Secret")))
+            # OpenCode's public catalog rejects Python-urllib's default UA.
+            # Exercise the actual outgoing HTTP headers without a live key.
+            if self.headers.get("User-Agent", "").startswith("Python-urllib"):
+                self.send_response(403)
+                self.end_headers()
+                return
+            assert self.headers.get("User-Agent") == ("FixtureClient/2.0" if user_agent_header else "HermesWebUI/1.0")
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b'{"data":[{"id":"vendor/new","context_length":8192},{"id":"vendor/new"},{"id":"model:free"}]}')
@@ -295,6 +303,8 @@ def test_discovery_probes_only_saved_owner_with_no_redirects(store):
     thread.start()
     try:
         data["providers"]["custom:relay"]["api"] = f"http://127.0.0.1:{server.server_port}/v1"
+        if user_agent_header:
+            data["providers"]["custom:relay"]["extra_headers"][user_agent_header] = "FixtureClient/2.0"
         path.write_text(yaml.safe_dump(data))
         before = path.read_bytes()
         result = discover(operation())
