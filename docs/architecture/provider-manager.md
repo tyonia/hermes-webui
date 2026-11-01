@@ -11,24 +11,43 @@ hooks. There is no React/Next.js dependency or separate provider database.
 The request's profile and `_get_config_path()` select the owning YAML file,
 including an explicit `HERMES_CONFIG_PATH` override. The browser is given the
 profile, save destination and an opaque revision bound to the selected path,
-resolved target and file contents. Both owner and revision must still match on
-every mutation or discovery request. The client never supplies a file path.
+resolved target, YAML contents and the owning profile's `.env` snapshot. Both
+owner and revision must still match on every mutation or discovery request.
+The client never supplies a file path.
 
 `GET /api/provider-manager` strictly reads a bounded regular YAML mapping and
 returns a redacted projection. Invalid YAML and dangling links refuse editing.
 Disabled records remain visible so they can be enabled again. Unknown fields
 and credential values are not included in the projection.
 
-The sidebar and global settings search list records owned by this profile's YAML
-config, including explicitly stored built-in records, plus managed providers with
-an explicit API key in this profile's `.env` (`key_source: env_file` from the
-profile-scoped `/api/providers` response). YAML records take precedence so each
-provider appears once. Ambient environment keys and automatic OAuth/local
-availability alone do not pin a provider. Catalog-only built-in, OAuth, plugin
-and local providers remain available through **Add provider → Provider type**.
-Opening one there keeps its authentication and default-model controls available
-without pinning it or deleting credentials. An empty profile starts with an empty
-editor; delayed catalog responses update the Add picker without replacing a draft.
+The sidebar and settings search use the single `/api/provider-manager` projection.
+It includes YAML records and built-in API providers with an explicit key in the
+current profile's `.env`. Registry metadata supplies editable endpoint templates
+without authentication or live catalog probes. YAML identities take precedence;
+aliases such as Google/Gemini do not generate additional automatic rows. Ambient
+keys and automatic OAuth/local availability alone do not pin a provider. The API
+catalog is available immediately through **Add provider → Provider type**; the
+slower `/api/providers` response only supplements authentication controls and
+OAuth/local choices, never sidebar membership. Late responses preserve drafts.
+
+An environment-backed API provider uses the same model editor as a YAML provider:
+add, discover, import selected models, delete individual models, and save. Reading
+does not write configuration. Its first Save materializes `providers.<id>` with an
+environment variable reference, preserving the built-in runtime identity rather
+than creating a custom alias or copying a key. New managed catalogs start in fixed
+mode with no imported models; an existing profile default is retained and protected
+from deletion. Existing YAML discovery settings remain unchanged. Only registry
+providers whose built-in identity is recognized by WebUI are materialized this way.
+
+**Delete provider** is visible beside the provider title. It removes that profile's
+record and model configuration. For registry providers it also records the canonical
+ID in `webui.provider_manager.removed_providers`, so retained credentials do not
+resurrect an editor row after reload. This is an editor membership preference in
+the same profile YAML, not a credential revocation: `.env`, OAuth stores and chat
+history are retained, and other Hermes catalog consumers may still detect the key.
+**Add provider → Save** explicitly restores the entry and clears its removal marker.
+Default/auxiliary/fallback references block removal until changed. Cancelled or
+failed operations leave the original file intact. An empty profile has no selection.
 The editor module asset revision is kept in sync between `index.html` and the
 service worker so a frontend-only update can load without restarting the backend.
 
@@ -48,8 +67,8 @@ chooses fixed catalog vs discovery mode through `discover_models`.
 
 API keys and request-header values use explicit keep/replace/remove operations.
 Choosing a credential environment variable replaces the record's other
-credential declarations; its value is never returned. Built-in credential
-cards continue to use the existing profile `.env` and authentication APIs.
+credential declarations; its value is never returned. API providers use the common
+credential form; OAuth cards use the existing profile authentication APIs.
 The editor does not modify OAuth stores or expose existing keys. References in
 the default model, auxiliary and fallback config block provider/model deletion
 or provider disable until the reference is changed. Historical chat records
@@ -72,7 +91,7 @@ runtime agent ownership remain unchanged.
 
 ## Explicit discovery
 
-`POST /api/provider-manager/discover` accepts only a saved record's owner,
+`POST /api/provider-manager/discover` accepts a saved record or profile-key-backed template's owner,
 revision and reference. It validates that this exact record owns the runtime
 identity before resolving that record's URL, key and headers within the
 request profile. It never uses another provider's credentials. The probe
@@ -88,7 +107,11 @@ ambient HTTP proxies, including for local model servers. Errors do not echo upst
 values. Command-based keys and credential pools remain preserved but are not
 executed by discovery; use Hermes CLI discovery for those configurations.
 
-The form requires saved provider settings before discovery. Search/select/import
+New Add drafts require Save before discovery; profile-key-backed templates can
+discover without a preliminary YAML write. Their endpoint honors that profile's
+explicit URL environment override or active model relay, and their key is resolved
+from the captured profile environment, never an ambient or other-profile key.
+Search/select/import
 changes only the draft; Save commits it. Results from a superseded selection
 are ignored. Navigation is locked during an in-flight mutation, and drafts
 survive refused saves. A background refresh restores the selected model by exact

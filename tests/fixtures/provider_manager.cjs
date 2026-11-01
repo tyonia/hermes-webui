@@ -31,24 +31,44 @@ let profile = 'default';
 let managed = [];
 let emptyProfile = false;
 let savedBuiltin = false;
+let keyedBuiltin = false;
+let removedBuiltin = false;
+let builtinModels = [];
+const posts = [];
 let delayManaged = false;
 let finishManaged = null;
-const view = () => ({profile, revision: 'revision', config_path: '/fixture/config.yaml', warnings: [], providers: emptyProfile ? [] : [{
+const builtin = () => ({
+  ref: savedBuiltin ? 'providers:opencode-go' : 'builtin:opencode-go', source: savedBuiltin ? 'providers' : 'builtin',
+  provider_id: 'opencode-go', name: 'OpenCode Go', base_url: 'https://opencode.ai/zen/go/v1',
+  api_mode: 'chat_completions', enabled: true, discover_models: false, default_model: '',
+  key_env: 'OPENCODE_GO_API_KEY', credential_configured: keyedBuiltin, headers: [], models: builtinModels,
+});
+const view = () => ({profile, revision: 'revision', config_path: '/fixture/config.yaml', warnings: [],
+  catalog: [{...builtin(), ref: 'builtin:opencode-go', models: []}], providers: emptyProfile ? [] : [{
   ref: 'providers:custom:relay', source: 'providers', provider_id: 'custom:relay', name: 'Gateway',
   base_url: 'https://fixture.invalid/v1', api_mode: '', enabled: true, discover_models: false,
   default_model: '', key_env: '', headers: [], models: [{id: 'vendor/model:free', original_id: 'vendor/model:free', label: 'Selected model', context_length: 8192}],
-}].concat(savedBuiltin ? [{
-  ref: 'providers:opencode-go', source: 'providers', provider_id: 'opencode-go', name: 'OpenCode Go',
-  base_url: 'https://opencode.ai/zen/go/v1', api_mode: 'chat_completions', enabled: true,
-  key_env: '', headers: [], models: [],
-}] : [])});
+}].concat(keyedBuiltin && !removedBuiltin ? [builtin()] : [])});
 const window = {addEventListener() {}, confirm: () => true};
 const context = {window, document, console, t: key => key,
   _buildProviderCard: provider => { const card = new Element('div'); card.textContent = 'Configured: ' + provider.has_key; return card; },
-  api: async path => {
-    if (path === '/api/provider-manager') return view();
+  api: async (path, options) => {
+    const owner = profile;
+    if (path === '/api/provider-manager/discover') {
+      posts.push(JSON.parse(options.body));
+      return {ok: true, models: [{id: 'fixture/discovered:free'}]};
+    }
+    if (path === '/api/provider-manager') {
+      if (options) {
+        const body = JSON.parse(options.body); posts.push(body);
+        removedBuiltin = body.op === 'delete';
+        if (!removedBuiltin) { savedBuiltin = true; builtinModels = body.changes?.models || builtinModels; }
+        return {...view(), saved_ref: removedBuiltin ? body.ref : 'providers:opencode-go'};
+      }
+      return view();
+    }
     if (delayManaged) await new Promise(resolve => { finishManaged = resolve; });
-    return {profile, providers: managed};
+    return {profile: owner, providers: managed};
   }};
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), context);
@@ -98,7 +118,7 @@ const button = text => root.walk().find(e => e.tagName === 'BUTTON' && e.textCon
   const typeLabel = root.walk().find(e => e.tagName === 'LABEL' && e.textContent === 'pm_provider_type');
   const picker = root.walk().find(e => e.id === typeLabel.htmlFor);
   for (const name of ['GitHub Copilot', 'OpenAI', 'Ollama']) assert.ok(picker.textContent.includes(name));
-  picker.value = 'copilot'; picker.listeners.change();
+  picker.value = 'managed:copilot'; picker.listeners.change();
   assert.equal(heading(), 'GitHub Copilot');
   assert.ok(!tree().textContent.includes('GitHub Copilot'), 'opening auth from Add must not pin a built-in');
   await window.HermesProviderManager.mount(root);
@@ -122,7 +142,7 @@ const button = text => root.walk().find(e => e.tagName === 'BUTTON' && e.textCon
   assert.equal(draftId.value, 'retained-new-id', 'late catalog must preserve typed provider settings');
   // Profile-owned .env keys are configured providers even without YAML rows.
   // Ambient/OAuth availability above must still not pin unrelated built-ins.
-  delayManaged = false; emptyProfile = false;
+  delayManaged = true; emptyProfile = false; keyedBuiltin = true;
   managed.push({id: 'opencode-go', display_name: 'OpenCode Go', configurable: true,
     has_key: true, key_source: 'env_file', models: []});
   for (const name of ['default', 'ophelia', 'sisyphus']) {
@@ -132,12 +152,44 @@ const button = text => root.walk().find(e => e.tagName === 'BUTTON' && e.textCon
     assert.equal(matches.length, 1, `${name}: show the configured provider exactly once`);
     const search = window.HermesProviderManager.searchEntries().filter(e => e.label === 'OpenCode Go');
     assert.equal(search.length, 1);
-    assert.equal(search[0].pmRef, savedBuiltin ? 'providers:opencode-go' : 'managed:opencode-go');
+    assert.equal(search[0].pmRef, savedBuiltin ? 'providers:opencode-go' : 'builtin:opencode-go');
     matches[0].listeners.click();
     assert.equal(heading(), 'OpenCode Go');
+    for (const action of ['pm_fetch_models', 'pm_add_model', 'pm_delete_provider']) {
+      assert.ok(button(action), `${name}: unified editor must offer ${action} before auth status resolves`);
+    }
+    assert.ok(root.walk().find(e => e.className === 'pm-heading').walk().some(e => e.tagName === 'BUTTON' && e.textContent === 'pm_delete_provider'), 'delete must be visible beside the title, outside Advanced settings');
+    assert.ok(!root.textContent.includes('Configured: true'), 'API providers must not use the legacy auth-only card');
     assert.ok(!tree().textContent.includes('GitHub Copilot'));
   }
+  delayManaged = false;
+  // Fetch/import/delete a single model, save, then delete the whole provider.
+  savedBuiltin = false; profile = 'default'; root = new Element('div');
+  await window.HermesProviderManager.mount(root);
+  button('OpenCode Go0').listeners.click();
+  await button('pm_fetch_models').listeners.click();
+  assert.equal(posts.at(-1).ref, 'builtin:opencode-go');
+  button('pm_select_shown').listeners.click(); button('pm_import_selected').listeners.click();
+  await button('pm_save').listeners.click();
+  assert.equal(posts.at(-1).op, 'save');
+  assert.equal(posts.at(-1).changes.models[0].id, 'fixture/discovered:free');
+  button('fixture/discovered:free').listeners.click();
+  button('pm_delete_model').listeners.click();
+  await button('pm_save').listeners.click();
+  assert.equal(posts.at(-1).changes.models.length, 0);
+  await button('pm_delete_provider').listeners.click();
+  assert.equal(posts.at(-1).op, 'delete');
+  assert.ok(!tree().textContent.includes('OpenCode Go'));
+  button('pm_add_provider').listeners.click();
+  const addLabel = root.walk().find(e => e.tagName === 'LABEL' && e.textContent === 'pm_provider_type');
+  const addPicker = root.walk().find(e => e.id === addLabel.htmlFor);
+  addPicker.value = 'builtin:opencode-go'; addPicker.listeners.change();
+  assert.equal(heading(), 'OpenCode Go');
+  assert.ok(!button('pm_save').disabled, 'explicit Add must allow restoring the removed builtin');
+  await button('pm_save').listeners.click();
+  assert.ok(tree().textContent.includes('OpenCode Go'));
   savedBuiltin = false;
+  keyedBuiltin = false;
   managed = managed.map(p => p.id === 'opencode-go' ? {...p, has_key: false, key_source: 'none'} : p);
   await window.HermesProviderManager.mount(root);
   assert.ok(!tree().textContent.includes('OpenCode Go'), 'removing the profile key must remove the managed sidebar row');
@@ -145,6 +197,6 @@ const button = text => root.walk().find(e => e.tagName === 'BUTTON' && e.textCon
   profile = 'no-key-profile'; root = new Element('div');
   await window.HermesProviderManager.mount(root);
   assert.ok(!tree().textContent.includes('OpenCode Go'), 'another profile must not inherit a configured card');
-  assert.ok(!window.HermesProviderManager.searchEntries().some(e => e.pmRef === 'managed:opencode-go'));
+  assert.ok(!window.HermesProviderManager.searchEntries().some(e => e.pmRef === 'builtin:opencode-go'));
   console.log('PASS selection refresh and profile draft isolation');
 })().catch(error => { console.error(error); process.exitCode = 1; });

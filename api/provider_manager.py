@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import re
 import stat
@@ -34,23 +35,106 @@ def _profile():
     return name
 
 
-def _snapshot(path, profile):
-    """Strict, bounded regular-file read: a parse error can never become {}."""
+def _identity(pid):
+    return config._resolve_provider_alias(config._canonicalise_provider_id(pid))
+
+
+def _builtin_templates(env):
+    """Local registry metadata only: never authenticate or fetch a catalog here."""
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+    except ImportError:
+        return {}
+    from api.providers import _PROVIDER_ENV_VAR_ALIASES
+    result = {}
+    for raw_id, provider in PROVIDER_REGISTRY.items():
+        if getattr(provider, "auth_type", "") != "api_key":
+            continue
+        pid = _identity(raw_id)
+        if config._is_native_custom_provider_key(pid):
+            # An Agent plugin unknown to this WebUI cannot be materialized as
+            # a built-in without silently changing its runtime identity.
+            continue
+        names = tuple(getattr(provider, "api_key_env_vars", ()) or ()) + _PROVIDER_ENV_VAR_ALIASES.get(pid, ())
+        if not names or pid in result:
+            continue
+        key_env = next((name for name in names if env.get(name)), names[0])
+        base = env.get(getattr(provider, "base_url_env_var", "")) or getattr(provider, "inference_base_url", "")
+        result[pid] = {"name": getattr(provider, "name", pid), "base_url": base,
+                       "key_env": key_env, "models": {}, "discover_models": False,
+                       "enabled": True}
+    return result
+
+
+def _templates_for(data, env):
+    templates = _builtin_templates(env)
+    model = data.get("model", {})
+    if isinstance(model, dict):
+        pid = _identity(model.get("provider", ""))
+        if pid in templates:
+            # A profile's explicit relay is authoritative. Never send its key
+            # to the registry's vendor URL instead, including before first Save.
+            entry = templates[pid]
+            if model.get("base_url"):
+                entry["base_url"] = model["base_url"]
+            mode = config._custom_record_api_mode(model)
+            if mode:
+                entry["api_mode"] = mode
+            if isinstance(model.get("extra_headers"), dict):
+                entry["extra_headers"] = copy.deepcopy(model["extra_headers"])
+            default = model.get("default")
+            if isinstance(default, str) and default.strip():
+                # A fixed catalog's first Save must not silently drop the
+                # profile's existing default before deletion guards see it.
+                entry["models"] = {default: {}}
+    return templates
+
+
+def _removed(data):
+    webui = data.get("webui", {})
+    manager = webui.get("provider_manager", {}) if isinstance(webui, dict) else None
+    removed = manager.get("removed_providers", []) if isinstance(manager, dict) else None
+    if not isinstance(removed, list) or any(not isinstance(pid, str) for pid in removed):
+        raise EditorError("WebUI provider removal settings are malformed; repair config.yaml first.", 422)
+    return {_identity(pid) for pid in removed}
+
+
+def _remember_removal(data, pid, removed):
+    identities = _removed(data)
+    before = set(identities)
+    if removed:
+        identities.add(_identity(pid))
+    else:
+        identities.discard(_identity(pid))
+    if identities == before:
+        return
+    manager = data.setdefault("webui", {}).setdefault("provider_manager", {})
+    manager["removed_providers"] = sorted(identities)
+
+
+def _read_regular(path, label):
+    """Bound the read on the opened descriptor, including after a symlink race."""
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(fd, "rb") as stream:
             st = os.fstat(stream.fileno())
             if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_CONFIG_BYTES:
-                raise EditorError("Configuration must be a regular file under 4 MiB.", 422)
+                raise EditorError(f"{label} must be a regular file under 4 MiB.", 422)
             raw = stream.read(MAX_CONFIG_BYTES + 1)
             if len(raw) > MAX_CONFIG_BYTES:
-                raise EditorError("Configuration is too large.", 422)
+                raise EditorError(f"{label} is too large.", 422)
     except FileNotFoundError:
         if path.is_symlink():
-            raise EditorError("Configuration symlink is dangling; repair it before editing.", 422) from None
+            raise EditorError(f"{label} symlink is dangling; repair it before editing.", 422) from None
         raw = b""
     except OSError:
-        raise EditorError("Configuration cannot be read; repair file permissions before editing.", 422) from None
+        raise EditorError(f"{label} cannot be read; repair file permissions before editing.", 422) from None
+    return raw
+
+
+def _snapshot(path, profile):
+    """Strict, bounded read: parse errors can never become empty configuration."""
+    raw = _read_regular(path, "Configuration")
     try:
         data = yaml.safe_load(raw.decode("utf-8-sig")) if raw.strip() else {}
     except Exception:
@@ -58,8 +142,17 @@ def _snapshot(path, profile):
     if not isinstance(data, dict):
         raise EditorError("Configuration must contain a YAML mapping.", 422)
     identity = f"{profile}\0{path.absolute()}\0{path.resolve()}\0".encode()
-    revision = hashlib.sha256(identity + raw).hexdigest()
-    return data, revision
+    home = profiles.get_active_hermes_home()
+    env_path = home / ".env"
+    try:
+        env = profiles._parse_dotenv_values(_read_regular(env_path, "Profile environment").decode("utf-8-sig"))
+    except UnicodeError:
+        raise EditorError("Profile environment cannot be parsed.", 422) from None
+    # Key rotation, home replacement and profile switching invalidate drafts,
+    # without returning any credential or credential fingerprint to the client.
+    env_identity = f"{home.resolve()}\0{env_path.resolve()}\0".encode() + json.dumps(env, sort_keys=True).encode()
+    revision = hashlib.sha256(identity + raw + b"\0" + env_identity).hexdigest()
+    return data, revision, env
 
 
 def _records(data):
@@ -76,6 +169,8 @@ def _records(data):
 
 
 def _provider_id(source, key, entry):
+    if source == "builtin":
+        return str(key)
     if source == "custom_providers":
         return config._custom_provider_slug_from_name(entry.get("name"))
     if config._is_native_custom_provider_key(key):
@@ -126,9 +221,17 @@ def _models(entry):
     return result
 
 
-def _view(data, revision, path, profile):
+def _view(data, revision, path, profile, env):
     entries = []
-    for ref, source, key, entry in _records(data):
+    templates = _templates_for(data, env)
+    removed = _removed(data)
+    rows = list(_records(data))
+    owned = {_identity(_provider_id(source, key, row)) for _, source, key, row in rows}
+    from api.providers import _provider_value_counts_as_api_key
+    rows += [("builtin:" + pid, "builtin", pid, entry) for pid, entry in templates.items()
+             if pid not in owned and pid not in removed
+             and _provider_value_counts_as_api_key(pid, env.get(entry["key_env"]))]
+    for ref, source, key, entry in rows:
         pid = _provider_id(source, key, entry)
         if not pid:
             continue
@@ -140,7 +243,7 @@ def _view(data, revision, path, profile):
             key_ref = raw_key[2:-1]
         headers = entry.get("extra_headers")
         entries.append({
-            "ref": ref, "source": source, "provider_id": pid,
+            "ref": ref, "source": source, "provider_id": pid, "canonical_id": _identity(pid),
             "name": str(entry.get("display_name") or entry.get("name") or key),
             "base_url": base_url, "base_url_redacted": redacted,
             "api_mode": config._custom_record_api_mode(entry) or "",
@@ -158,21 +261,39 @@ def _view(data, revision, path, profile):
         warnings.append("The legacy custom_providers store suppresses native custom catalogs. New providers will use the legacy store.")
     return {"profile": profile, "config_path": str(path), "revision": revision,
             "providers": entries, "default": {"provider": main.get("provider", ""), "model": main.get("default", "")} if isinstance(main, dict) else {},
+            "catalog": [_project_template(pid, entry, env) for pid, entry in templates.items()],
             "warnings": warnings}
+
+
+def _project_template(pid, entry, env):
+    base, redacted = _public_url(entry.get("base_url"))
+    return {"ref": "builtin:" + pid, "source": "builtin", "provider_id": pid, "canonical_id": pid,
+            "aliases": [alias for alias, target in config._PROVIDER_ALIASES.items() if _identity(target) == pid],
+            "name": entry.get("name", pid), "base_url": base, "base_url_redacted": redacted,
+            "api_mode": entry.get("api_mode", ""), "enabled": True,
+            "discover_models": False, "default_model": "", "models": _models(entry),
+            "headers": [{"name": name, "configured": True} for name in entry.get("extra_headers", {})],
+            "key_env": entry["key_env"], "credential_configured": bool(env.get(entry["key_env"]))}
 
 
 def read_editor():
     with config._cfg_lock:
         path = config._get_config_path()
         profile = _profile()
-        data, revision = _snapshot(path, profile)
-        return _view(data, revision, path, profile)
+        data, revision, env = _snapshot(path, profile)
+        return _view(data, revision, path, profile, env)
 
 
-def _find(data, ref):
+def _find(data, ref, env=None):
     for row in _records(data):
         if row[0] == ref:
             return row
+    if isinstance(ref, str) and ref.startswith("builtin:"):
+        pid = ref[len("builtin:"):]
+        template = _templates_for(data, env or {}).get(pid)
+        owned = {_identity(_provider_id(source, key, row)) for _, source, key, row in _records(data)}
+        if template is not None and pid not in owned:
+            return ref, "builtin", pid, copy.deepcopy(template)
     raise EditorError("Provider no longer exists. Reload the editor.", 409)
 
 
@@ -182,7 +303,7 @@ def _uses(data, pid, mid=None):
         if isinstance(value, dict):
             provider = value.get("provider") or value.get("model_provider")
             model = value.get("default") or value.get("model")
-            if isinstance(provider, str) and (provider == pid or config._custom_provider_slug_from_name(provider) == pid):
+            if isinstance(provider, str) and (_identity(provider) == _identity(pid) or config._custom_provider_slug_from_name(provider) == pid):
                 if mid is None or model == mid:
                     yield path or "config"
             for key, child in value.items():
@@ -353,7 +474,7 @@ def write_editor(body):
     with config._cfg_lock:
         path = config._get_config_path()
         profile = _profile()
-        data, revision = _snapshot(path, profile)
+        data, revision, env = _snapshot(path, profile)
         if body.get("profile") != profile or body.get("revision") != revision:
             raise EditorError("Profile or configuration changed. Reload the editor; your draft has not been saved.", 409)
         op = body.get("op")
@@ -380,9 +501,15 @@ def write_editor(body):
             ref = f"{source}:{key}"
         else:
             ref = body.get("ref")
-            _, source, key, original = _find(data, ref)
+            _, source, key, original = _find(data, ref, env)
             pid = _provider_id(source, key, original)
             entry = copy.deepcopy(original)
+            if source == "builtin":
+                if not isinstance(data.get("providers", {}), dict):
+                    raise EditorError("Native provider store is malformed.", 422)
+                source = "providers"
+                data.setdefault(source, {})
+                ref = "providers:" + key
             data[source][key] = entry
         if op in {"create", "save"}:
             _patch(entry, body.get("changes", {}), source, data, pid)
@@ -391,6 +518,7 @@ def write_editor(body):
                 raise EditorError("Change configured references before disabling this provider.", 409)
             if op == "create" and not entry.get("base_url"):
                 raise EditorError("A new custom provider needs a Base URL.")
+            _remember_removal(data, pid, False)
         elif op == "delete":
             if _uses(data, pid):
                 raise EditorError("This provider is referenced by model, auxiliary, or fallback configuration. Change those references first.", 409)
@@ -398,6 +526,8 @@ def write_editor(body):
                 del data[source][key]
             else:
                 del data[source][key]
+            if _identity(pid) in _builtin_templates(env):
+                _remember_removal(data, pid, True)
         else:
             raise EditorError("Unknown editor operation.")
         # Optimistic validation under the same lock used by WebUI's other YAML
@@ -425,7 +555,7 @@ def _set_default(body):
     with config._cfg_lock:
         path = config._get_config_path()
         profile = _profile()
-        data, revision = _snapshot(path, profile)
+        data, revision, env = _snapshot(path, profile)
         if body.get("profile") != profile or body.get("revision") != revision:
             raise EditorError("Profile or configuration changed. Reload the editor.", 409)
         ref = body.get("ref")
@@ -434,7 +564,7 @@ def _set_default(body):
             if pid.startswith("custom") or not config._is_known_model_provider(pid):
                 raise EditorError("Unknown managed provider.")
         else:
-            _, source, key, entry = _find(data, ref)
+            _, source, key, entry = _find(data, ref, env)
             pid = _provider_id(source, key, entry)
             if not config._raw_provider_record_enabled(entry):
                 raise EditorError("Enable this provider before setting a default.", 409)
@@ -456,15 +586,17 @@ def discovery_record(body):
     with config._cfg_lock:
         path = config._get_config_path()
         profile = _profile()
-        data, revision = _snapshot(path, profile)
+        data, revision, env = _snapshot(path, profile)
         if body.get("profile") != profile or body.get("revision") != revision:
             raise EditorError("Profile or configuration changed. Reload before fetching models.", 409)
-        _, source, key, entry = _find(data, body.get("ref"))
+        _, source, key, entry = _find(data, body.get("ref"), env)
         if not config._raw_provider_record_enabled(entry):
             raise EditorError("Enable this provider before fetching models.", 409)
         # Validate the same identity the runtime would use. A shadowed native
         # row must never probe with a legacy row's credential (or vice versa).
         pid = _provider_id(source, key, entry)
+        if source == "builtin" and (_identity(pid) in _removed(data) or not env.get(entry.get("key_env"))):
+            raise EditorError("Add and save this provider before fetching models.", 409)
         selected = config._normalized_raw_provider_record(entry, str(key)) if source == "providers" else entry
         if pid.startswith("custom:"):
             try:
@@ -473,4 +605,7 @@ def discovery_record(body):
                 raise EditorError("Provider identity is ambiguous. Repair conflicting entries before discovery.", 409) from None
             if owned is None or owned_source != source or owned != selected:
                 raise EditorError("This record is disabled, ambiguous, or shadowed by another provider store.", 409)
-        return copy.deepcopy(selected)
+        selected = copy.deepcopy(selected)
+        if selected.get("key_env") in env and not selected.get("api_key"):
+            selected["api_key"] = env[selected["key_env"]]
+        return selected

@@ -17,6 +17,7 @@ def store(tmp_path, monkeypatch):
     path = tmp_path / "config.yaml"
     monkeypatch.setattr(config, "_get_config_path", lambda: path)
     monkeypatch.setattr(editor, "_profile", lambda: "fixture-profile")
+    monkeypatch.setattr(editor.profiles, "get_active_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(config, "reload_config", lambda: None)
     events = []
     monkeypatch.setattr(config, "invalidate_models_cache", lambda: events.append("models"))
@@ -341,6 +342,153 @@ def test_editor_http_boundary():
     with pytest.raises(urllib.error.HTTPError) as exc:
         urllib.request.urlopen(request)
     assert exc.value.code == 409
+
+
+@pytest.fixture
+def keyed_builtin(store, monkeypatch):
+    path, _, _ = store
+    env = path.parent / ".env"
+    env.write_text("OPENCODE_GO_API_KEY=fixture-profile-key\n")
+    def templates(values):
+        return {"opencode-go": {"name": "OpenCode Go", "base_url": "https://opencode.ai/zen/go/v1",
+                "key_env": "OPENCODE_GO_API_KEY", "api_mode": "chat_completions", "models": {},
+                "discover_models": False, "enabled": True}}
+    monkeypatch.setattr(editor, "_builtin_templates", templates, raising=False)
+    return path, env
+
+
+def builtin_body(op="save", **extra):
+    view = editor.read_editor()
+    return {"op": op, "profile": view["profile"], "revision": view["revision"],
+            "ref": "builtin:opencode-go", **extra}
+
+
+def test_profile_key_has_full_editor_immediately_without_catalog_probe(keyed_builtin):
+    path, _ = keyed_builtin
+    before = path.read_bytes()
+    view = editor.read_editor()
+    row = next(p for p in view["providers"] if p["provider_id"] == "opencode-go")
+    assert row["ref"] == "builtin:opencode-go"
+    assert row["models"] == [] and row["key_env"] == "OPENCODE_GO_API_KEY"
+    assert row["credential_configured"]
+    assert any(p["provider_id"] == "opencode-go" for p in view["catalog"])
+    assert "fixture-profile-key" not in json.dumps(view)
+    assert path.read_bytes() == before
+
+
+def test_builtin_model_edits_materialize_original_identity_without_copying_key(keyed_builtin):
+    path, env = keyed_builtin
+    result = editor.write_editor(builtin_body(changes={"models": [{"id": "vendor/new:free"}]}))
+    saved = raw(path)["providers"]["opencode-go"]
+    assert saved["key_env"] == "OPENCODE_GO_API_KEY"
+    assert "api_key" not in saved and saved["discover_models"] is False
+    assert list(saved["models"]) == ["vendor/new:free"]
+    assert result["saved_ref"] == "providers:opencode-go"
+    assert len([p for p in result["providers"] if p["provider_id"] == "opencode-go"]) == 1
+    view_row = next(p for p in result["providers"] if p["provider_id"] == "opencode-go")
+    editor.write_editor({"op": "save", "profile": result["profile"], "revision": result["revision"],
+                         "ref": view_row["ref"], "changes": {"models": []}})
+    assert raw(path)["providers"]["opencode-go"]["models"] == {}
+    assert env.read_text() == "OPENCODE_GO_API_KEY=fixture-profile-key\n"
+
+
+@pytest.mark.parametrize("materialized", [False, True])
+def test_delete_builtin_stays_removed_until_explicit_add(keyed_builtin, materialized):
+    path, env = keyed_builtin
+    body = builtin_body()
+    if materialized:
+        result = editor.write_editor(body)
+        body.update(revision=result["revision"], ref=result["saved_ref"])
+    result = editor.write_editor({**body, "op": "delete"})
+    assert not any(p["provider_id"] == "opencode-go" for p in result["providers"])
+    assert not any(p["provider_id"] == "opencode-go" for p in editor.read_editor()["providers"])
+    assert any(p["provider_id"] == "opencode-go" for p in result["catalog"])
+    assert "fixture-profile-key" in env.read_text()
+    assert "opencode-go" not in raw(path)["providers"]
+    result = editor.write_editor(builtin_body())  # Explicit Add + Save
+    assert any(p["provider_id"] == "opencode-go" for p in result["providers"])
+
+
+def test_builtin_rejects_key_rotation_or_other_profile_and_never_uses_ambient_key(keyed_builtin, monkeypatch):
+    _, env = keyed_builtin
+    body = builtin_body()
+    env.write_text("OPENCODE_GO_API_KEY=rotated-fixture-key\n")
+    with pytest.raises(editor.EditorError) as exc:
+        editor.write_editor(body)
+    assert exc.value.status == 409
+    with pytest.raises(editor.EditorError):
+        editor.discovery_record(body)
+    env.write_text("")
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "ambient-wrong-profile-key")
+    assert not any(p["provider_id"] == "opencode-go" for p in editor.read_editor()["providers"])
+    with pytest.raises(editor.EditorError):
+        editor.discovery_record(builtin_body())
+
+
+def test_builtin_discovery_resolves_only_own_profile_key_and_preserves_owner(keyed_builtin):
+    selected = editor.discovery_record(builtin_body())
+    assert selected["base_url"] == "https://opencode.ai/zen/go/v1"
+    assert selected["api_key"] == "fixture-profile-key"
+    result = editor.write_editor(builtin_body())
+    with pytest.raises(editor.EditorError):
+        editor.write_editor(builtin_body())  # stale virtual ref cannot replace YAML owner
+    assert result["saved_ref"] == "providers:opencode-go"
+
+
+def test_referenced_builtin_cannot_be_deleted(keyed_builtin):
+    path, _ = keyed_builtin
+    data = raw(path)
+    data["model"] = {"provider": "opencode-go", "default": "important-model"}
+    path.write_text(yaml.safe_dump(data))
+    before = path.read_bytes()
+    with pytest.raises(editor.EditorError) as exc:
+        editor.write_editor(builtin_body("delete"))
+    assert exc.value.status == 409
+    assert path.read_bytes() == before
+
+
+def test_builtin_obeys_profile_relay_before_first_save(keyed_builtin):
+    path, _ = keyed_builtin
+    data = raw(path)
+    data["model"] = {"provider": "opencode-go", "base_url": "https://profile-relay.invalid/v1",
+                     "extra_headers": {"X-Relay-Secret": "fixture-relay-secret"}}
+    path.write_text(yaml.safe_dump(data))
+    view = editor.read_editor()
+    assert "fixture-relay-secret" not in json.dumps(view)
+    row = next(p for p in view["providers"] if p["provider_id"] == "opencode-go")
+    assert row["base_url"] == "https://profile-relay.invalid/v1"
+    selected = editor.discovery_record(builtin_body())
+    assert selected["base_url"] == row["base_url"]
+    assert selected["extra_headers"] == {"X-Relay-Secret": "fixture-relay-secret"}
+
+
+def test_registry_templates_dedupe_aliases_and_use_profile_environment_only(monkeypatch):
+    import sys
+    import types
+    provider = types.SimpleNamespace(auth_type="api_key", name="Google AI Studio",
+        api_key_env_vars=("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        inference_base_url="https://google.invalid/v1beta", base_url_env_var="GEMINI_BASE_URL")
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", types.SimpleNamespace(
+        PROVIDER_REGISTRY={"gemini": provider, "google": provider}))
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://ambient-wrong-profile.invalid")
+    templates = editor._builtin_templates({"GEMINI_API_KEY": "fixture-key"})
+    assert list(templates) == ["gemini"]
+    assert templates["gemini"]["key_env"] == "GEMINI_API_KEY"
+    assert templates["gemini"]["base_url"] == "https://google.invalid/v1beta"
+
+
+def test_profile_default_survives_first_builtin_catalog_save(keyed_builtin):
+    path, _ = keyed_builtin
+    data = raw(path)
+    data["model"] = {"provider": "opencode-go", "default": "important-default"}
+    path.write_text(yaml.safe_dump(data))
+    row = next(p for p in editor.read_editor()["providers"] if p["provider_id"] == "opencode-go")
+    assert [m["id"] for m in row["models"]] == ["important-default"]
+    before = path.read_bytes()
+    with pytest.raises(editor.EditorError) as exc:
+        editor.write_editor(builtin_body(changes={"models": [{"id": "new-model"}]}))
+    assert exc.value.status == 409
+    assert path.read_bytes() == before
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFO")

@@ -48,11 +48,16 @@ _INITIAL_PROCESS_ENV = dict(os.environ)
 
 def _read_dotenv_values(env_path) -> dict[str, str]:
     """KEY=VALUE pairs of a .env file as the launchers read it (``export`` prefix and quotes stripped); {} on error."""
-    values: dict[str, str] = {}
     try:
         text = Path(env_path).expanduser().read_text(encoding="utf-8")
     except Exception:
-        return values
+        return {}
+    return _parse_dotenv_values(text)
+
+
+def _parse_dotenv_values(text: str) -> dict[str, str]:
+    """Parse an already captured environment snapshot using launcher semantics."""
+    values: dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith('#') or '=' not in line:

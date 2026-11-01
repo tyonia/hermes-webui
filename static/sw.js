@@ -22,7 +22,7 @@ const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 // Navigations populate './' only after a successful non-redirect network load.
 const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
-  './static/provider_manager.js' + VQ + '-pm3',
+  './static/provider_manager.js' + VQ + '-pm4',
   './static/provider_manager.css' + VQ,
   './static/style.css' + VQ,
   './static/pwa-startup.js' + VQ,

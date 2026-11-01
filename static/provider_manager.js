@@ -104,7 +104,7 @@
         this.managed = [];
         this.stale = false;
         const oldRef = this.current && this.current.ref;
-        const next = view.providers.find(p => p.ref === oldRef) || view.providers[0];
+        const next = view.providers.find(p => p.ref === oldRef) || view.providers.find(p => p.provider_id === this.current?.provider_id) || view.providers[0];
         this.current = selectedManaged ? {ref: 'managed:' + selectedManaged.id, managed: selectedManaged} : next ? this.draft(next) : null;
         const restoredIndex = selectedModel && next ? next.models.findIndex(model => model.id === selectedModel) : -1;
         this.index = restoredIndex >= 0 ? restoredIndex : null;
@@ -148,6 +148,9 @@
     canLeave() { return !this.dirty || window.confirm(tr('discard')); }
     select(ref, index = null) {
       if (this.busy) return;
+      const template = (this.view.catalog || []).find(p => p.ref === ref);
+      const owned = template && this.view.providers.find(p => (p.canonical_id || p.provider_id) === template.provider_id);
+      if (owned) ref = owned.ref;
       if (this.current && this.current.ref === ref) {
         this.index = index;
         this.renderSidebar();
@@ -161,11 +164,13 @@
       this.discovery = null;
       this.index = index;
       const entry = this.view.providers.find(p => p.ref === ref);
+      const catalogEntry = !entry && (this.view.catalog || []).find(p => p.ref === ref);
       const managed = this.managed.find(p => 'managed:' + p.id === ref);
-      this.current = entry ? this.draft(entry) : managed ? {ref, managed} : null;
+      this.current = entry ? this.draft(entry) : catalogEntry ? {...this.draft(catalogEntry), fromCatalog: true} : managed ? {ref, managed} : null;
+      if (catalogEntry) this.dirty = true;
       this.renderSidebar();
       this.renderDetail();
-      this.message('');
+      this.message(catalogEntry ? tr('unsaved') : '');
       this.detail.focus();
     }
     create() {
@@ -224,12 +229,6 @@
       this.renderSidebar();
       this.renderDetail();
     }
-    configuredManaged() {
-      const owned = new Set(this.view.providers.map(p => p.provider_id));
-      // has_key alone includes ambient credentials and automatic OAuth status.
-      // env_file identifies an explicit key in this request profile's .env.
-      return this.managed.filter(p => !owned.has(p.id) && p.has_key && p.key_source === 'env_file');
-    }
     renderSidebar() {
       this.tree.replaceChildren();
       const query = this.query.toLowerCase().trim();
@@ -253,14 +252,6 @@
           this.tree.append(item);
         }
       }
-      for (const provider of this.configuredManaged()) {
-        if (query && ![provider.display_name, provider.id].some(s => s.toLowerCase().includes(query))) continue;
-        count++;
-        const ref = 'managed:' + provider.id;
-        const item = button(provider.display_name, () => this.select(ref), 'pm-provider-row');
-        item.setAttribute('aria-current', String(this.current?.ref === ref));
-        this.tree.append(item);
-      }
       if (!count) this.tree.append(node('p', 'pm-empty', tr('no_matches')));
     }
     renderDetail() {
@@ -277,6 +268,11 @@
       title.append(node('h3', '', this.index === null ? current.isNew ? tr('new_provider') : current.name : current.models[this.index]?.label || current.models[this.index]?.id || tr('new_model')));
       title.append(node('p', 'pm-muted pm-identity', current.provider_id || tr('stable_id')));
       heading.append(title);
+      if (this.index === null && !current.isNew && !current.fromCatalog) {
+        const remove = button(tr('delete_provider'), () => this.removeProvider(), 'pm-danger');
+        remove.dataset.pmPersist = 'true';
+        heading.append(remove);
+      }
       this.detail.append(heading);
       this.form = node('fieldset', 'pm-fields');
       this.form.disabled = this.busy;
@@ -291,7 +287,10 @@
       this.updateActions();
     }
     providerTypes() {
-      return [['', tr('custom_endpoint')], ...this.managed.map(provider => [provider.id, provider.display_name])];
+      const catalog = this.view.catalog || [];
+      const ids = new Set(catalog.flatMap(provider => [provider.provider_id, ...(provider.aliases || [])]));
+      return [['', tr('custom_endpoint')], ...catalog.map(provider => [provider.ref, provider.name]),
+        ...this.managed.filter(provider => !ids.has(provider.id)).map(provider => ['managed:' + provider.id, provider.display_name])];
     }
     updateProviderTypes() {
       if (!this.current?.isNew || !this.providerTypeSelect) return;
@@ -305,7 +304,7 @@
     }
     renderProvider(draft) {
       if (draft.isNew) {
-        const type = field(tr('provider_type'), '', id => { if (id) this.select('managed:' + id); }, {options: this.providerTypes()});
+        const type = field(tr('provider_type'), '', ref => { if (ref) this.select(ref); }, {options: this.providerTypes()});
         this.providerTypeSelect = type.querySelector('select');
         this.form.append(type);
         this.form.append(field(tr('provider_id'), draft.id, value => { draft.id = value; this.markDirty(); }, {placeholder: 'my-gateway', hint: tr('stable_id')}));
@@ -330,7 +329,7 @@
       if (mode === 'env') credential.append(field(tr('env_name'), draft.credential.value, value => { draft.credential.value = value; this.markDirty(); }, {placeholder: 'MY_PROVIDER_API_KEY', hint: tr('env_hint')}));
       if (mode === 'keep' && draft.key_env) credential.append(node('p', 'pm-muted', tr('env_name') + ': ' + draft.key_env));
       const managed = this.managed.find(p => p.id === draft.provider_id);
-      if (managed) {
+      if (managed?.is_oauth) {
         const auth = node('details', 'pm-section');
         auth.append(node('summary', '', tr('managed_auth')));
         auth.append(_buildProviderCard(managed));
@@ -371,7 +370,6 @@
         this.markDirty(); this.renderDetail();
         this.detail.querySelector('details').open = true;
       }));
-      if (!draft.isNew) advanced.append(button(tr('delete_provider'), () => this.removeProvider(), 'pm-danger'));
       this.form.append(advanced);
     }
     renderModel(draft, model) {
@@ -517,9 +515,7 @@
         {label: provider.name, searchBlob: provider.name + ' ' + provider.provider_id, pmRef: provider.ref},
         ...provider.models.map((model, index) => ({label: provider.name + ' / ' + (model.label || model.id), searchBlob: provider.name + ' ' + provider.provider_id + ' ' + model.id + ' ' + model.label, pmRef: provider.ref, pmModelIndex: index})),
       ]);
-      return saved.concat(instance.configuredManaged().map(provider => ({
-        label: provider.display_name, searchBlob: provider.display_name + ' ' + provider.id, pmRef: 'managed:' + provider.id,
-      })));
+      return saved;
     },
     reveal(ref, index) {
       if (!instance || instance.stale) return null;
