@@ -378,6 +378,13 @@ never substitutes local goal execution. `/goal status`, `pause`, `resume`, and
 `clear` delegate to the runner when supported. Legacy-direct and legacy-journal
 goal kickoff behavior is unchanged for supported routes. Normal runner chat supports provider-only model aliases.
 
+`/goal <text>` reads Hermes Agent's inline completion-contract lines (`outcome:`,
+`verification:`, `constraints:`, `boundaries:`, `stop when:`) into the goal's contract
+and keeps the first plain line(s) as the goal. `/goal gate …` is refused with HTTP 400
+(`error: unsupported_gate`) on every backend, without changing the goal or starting a run:
+gates rerun shell commands after every turn and WebUI has no rule yet for who may add them.
+Use `/goal -- <text>` for a goal that starts with a control word such as `gate` or `pause`.
+
 Server-initiated turns retain the pre-session stale-Agent-runtime barrier. It
 runs before loading the session; named-profile alias and Gateway routing happen
 only after admission. A stale default local runtime can therefore reject a wakeup
@@ -385,12 +392,13 @@ before the session's named-profile Gateway ownership is known.
 
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
-- **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
+- **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts; a **Scripts** subtab for a read-only browse of the profile's `~/.hermes/scripts/` directory (see [docs/scripts-panel.md](docs/scripts-panel.md))
 - **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
 - **Todos** -- live task list from the current session; hidden while the in-chat task list toggle is on, which also disables the workspace-panel Todos tab
 - **Insights** -- token, cost, and skill-usage analytics; period presets (7/30/90/365 days) plus a **Custom range** with start/end date pickers
+- **Artifacts** -- files changed in the session and Skills Used, with a separate skill count and per-skill use counts
 - **Spaces** -- add, rename, remove workspaces; quick-switch from topbar
 
 ### Mobile responsive
@@ -794,6 +802,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`THEMES.md`](THEMES.md) — theme + skin system, custom theme guide
 - [`docs/workspace-git.md`](docs/workspace-git.md) — the workspace Git controls
 - [`docs/kanban.md`](docs/kanban.md) — the Kanban board's status flow: who may set which column, how tasks enter and leave Scheduled, and the parent re-gating on Scheduled/Blocked → Ready
+- [`docs/scripts-panel.md`](docs/scripts-panel.md) — the Tasks panel's Scripts subtab: where the profile's `~/.hermes/scripts/` directory comes from, the read-only endpoints, and the containment rules
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
 
 **Deploying & operating**

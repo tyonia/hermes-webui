@@ -142,7 +142,8 @@ def test_scope_revokes_inflight_catalog_after_profile_or_config_change(catalog_s
 
 def test_oauth_discovery_uses_agent_and_rejects_changed_owner(catalog_store, monkeypatch):
     from api import provider_manager_probe as probe
-    import hermes_cli.models
+    agent_models = types.ModuleType("hermes_cli.models")
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", agent_models)
     path, data, _ = catalog_store
     data["model"] = {"provider": "xai-oauth", "default": "grok-current"}
     path.write_text(editor.yaml.safe_dump(data))
@@ -152,13 +153,13 @@ def test_oauth_discovery_uses_agent_and_rejects_changed_owner(catalog_store, mon
     def models(provider):
         calls.append((provider, editor.profiles.get_active_hermes_home()))
         return ["grok-chat", "grok-imagine-image", "grok-imagine-video"]
-    monkeypatch.setattr(hermes_cli.models, "provider_model_ids", models)
+    agent_models.provider_model_ids = models
     assert [row["id"] for row in probe.discover(body)["models"]] == ["grok-chat"]
     assert calls == [("xai-oauth", path.parent)]
     def changed(provider):
         path.write_text(path.read_text() + "\n# config changed during probe\n")
         return ["must-not-publish"]
-    monkeypatch.setattr(hermes_cli.models, "provider_model_ids", changed)
+    agent_models.provider_model_ids = changed
     with pytest.raises(editor.EditorError) as exc:
         probe.discover(body)
     assert exc.value.status == 409
